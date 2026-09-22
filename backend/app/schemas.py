@@ -271,3 +271,67 @@ class DashboardOut(BaseModel):
     graded_count: int
     pending_count: int
     storage: StorageHealth
+
+
+# --------------------------------------------------------------------------- #
+# i学习 抓取
+# --------------------------------------------------------------------------- #
+class IstudyStatus(BaseModel):
+    """i学习 连接状态：浏览器调试端口是否可用、登录态是否有效。"""
+
+    available: bool = Field(False, description="能否连上浏览器调试端口")
+    logged_in: bool = Field(False, description="i学习 登录态是否有效")
+    browser: str | None = Field(None, description="浏览器标识")
+    message: str = ""
+
+
+class IstudyCourseOut(BaseModel):
+    """i学习 上的课程。"""
+
+    cid: str
+    cpi: str
+    name: str
+
+
+class IstudyRosterImportRequest(BaseModel):
+    course_id: int = Field(..., description="导入到本地哪个课程下")
+    cid: str | None = Field(None, description="i学习 课程 id；不传则按课程名自动匹配")
+    cpi: str | None = Field(None, description="i学习 课程 cpi")
+    source_course_name: str | None = Field(
+        None, description="i学习 课程名，用于自动匹配本地课程"
+    )
+    replace: bool = Field(
+        False, description="导入前是否清空该课程现有名单（班级 / 学生 / 评分结果）"
+    )
+
+
+class IstudyClassCount(BaseModel):
+    class_name: str
+    count: int = 0
+    error: str | None = None
+
+
+class IstudyRosterImportResult(BaseModel):
+    course_id: int
+    course_name: str
+    source_course_name: str
+    classes: list[IstudyClassCount] = Field(default_factory=list)
+    scraped_students: int = Field(0, description="抓到的学生条数")
+    classes_created: int = 0
+    classes_linked: int = 0
+    students_created: int = 0
+    students_updated: int = 0
+    classes_removed: int = 0
+    students_removed: int = 0
+    results_removed: int = 0
+    skipped: list[dict] = Field(default_factory=list)
+    message: str = ""
+
+
+class RosterClearResult(BaseModel):
+    course_id: int
+    course_name: str
+    classes_removed: int = 0
+    students_removed: int = 0
+    results_removed: int = 0
+    message: str = ""

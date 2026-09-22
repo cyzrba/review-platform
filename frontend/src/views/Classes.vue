@@ -4,17 +4,21 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   PAGE_SIZE,
+  clearCourseRoster,
   createClass,
   createCourse,
   createStudent,
   deleteClass,
   deleteCourse,
   deleteStudent,
+  getIstudyStatus,
+  importIstudyRoster,
   importRoster,
   linkClasses,
   listClasses,
   listCourseClasses,
   listCourses,
+  listIstudyCourses,
   listStudents,
   rosterTemplateUrl,
   unlinkClass,
@@ -50,6 +54,16 @@ const importDialog = ref(false)
 const importFile = ref(null)
 const importing = ref(false)
 const importResult = ref(null)
+
+// 一键获取学生名单（从 i学习 抓取）
+const rosterDialog = ref(false)
+const istudyStatus = ref(null)
+const istudyCourses = ref([])
+const istudyCourseKey = ref('')
+const replaceBeforeImport = ref(true)
+const syncingRoster = ref(false)
+const syncSummary = ref(null)
+const clearingRoster = ref(false)
 
 const currentCourse = computed(() => courses.value.items.find((item) => item.id === courseId.value))
 const currentClass = computed(() => classes.value.items.find((item) => item.id === classId.value))
@@ -338,6 +352,75 @@ onMounted(async () => {
   await loadCourses(1)
   await loadClasses(1)
 })
+
+// --------------------------------------------------------------------- //
+// 一键获取学生名单
+// --------------------------------------------------------------------- //
+async function openRosterDialog() {
+  rosterDialog.value = true
+  syncSummary.value = null
+  istudyStatus.value = null
+  istudyCourses.value = []
+  istudyCourseKey.value = ''
+  try {
+    istudyStatus.value = await getIstudyStatus()
+    if (!istudyStatus.value.available) return
+    istudyCourses.value = await listIstudyCourses()
+    const localName = (currentCourse.value?.name || '').trim()
+    const matched = istudyCourses.value.find((item) => item.name.trim() === localName)
+    const target = matched || istudyCourses.value[0]
+    if (target) istudyCourseKey.value = `${target.cid}|${target.cpi}`
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+async function submitRosterSync() {
+  if (!courseId.value) {
+    ElMessage.warning('请先选择一个课程')
+    return
+  }
+  const [cid, cpi] = (istudyCourseKey.value || '').split('|')
+  syncingRoster.value = true
+  syncSummary.value = null
+  try {
+    syncSummary.value = await importIstudyRoster({
+      course_id: courseId.value,
+      cid: cid || null,
+      cpi: cpi || null,
+      source_course_name: currentCourse.value?.name || null,
+      replace: replaceBeforeImport.value,
+    })
+    ElMessage.success(syncSummary.value.message)
+    await loadCourses(courses.value.page)
+    await loadClasses(1)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    syncingRoster.value = false
+  }
+}
+
+async function clearRoster() {
+  if (!courseId.value) return
+  await ElMessageBox.confirm(
+    `清空课程「${currentCourse.value?.name}」下挂的全部班级、学生和评分结果？此操作不可恢复。`,
+    '警告',
+    { type: 'warning' },
+  )
+  clearingRoster.value = true
+  try {
+    const result = await clearCourseRoster(courseId.value)
+    ElMessage.success(result.message)
+    classId.value = null
+    await loadCourses(courses.value.page)
+    await loadClasses(1)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    clearingRoster.value = false
+  }
+}
 </script>
 
 <template>
@@ -349,7 +432,19 @@ onMounted(async () => {
           先建课程 → 选中课程 → 导入班级与学生（名单列：学号/工号、姓名、院系、专业、班级、加入时间、入学年份）
         </div>
       </div>
-      <el-button tag="a" :href="rosterTemplateUrl" target="_blank">下载名单模板</el-button>
+      <div style="display: flex; gap: 8px">
+        <el-button
+          :disabled="!courseId"
+          :loading="clearingRoster"
+          @click="clearRoster"
+        >
+          清空名单
+        </el-button>
+        <el-button type="primary" :disabled="!courseId" @click="openRosterDialog">
+          一键获取学生名单
+        </el-button>
+        <el-button tag="a" :href="rosterTemplateUrl" target="_blank">下载名单模板</el-button>
+      </div>
     </div>
 
     <div class="split-3">
@@ -477,17 +572,18 @@ onMounted(async () => {
             <el-button size="small" :disabled="!classId" @click="studentDialog = true">添加学生</el-button>
           </div>
         </div>
+        <!-- 列都用 min-width：Element Plus 会按比例把剩余宽度分给各列，
+             表格始终填满容器，不会在右边空出一大片 -->
         <el-table :data="students.items" v-loading="loading.students" empty-text="暂无学生">
-          <el-table-column prop="student_no" label="学号 / 工号" width="160" />
-          <el-table-column prop="name" label="姓名" width="100" />
-          <el-table-column prop="enrollment_year" label="入学年份" width="110">
+          <el-table-column prop="student_no" label="学号 / 工号" min-width="180" />
+          <el-table-column prop="name" label="姓名" min-width="150" />
+          <el-table-column prop="enrollment_year" label="入学年份" min-width="130" align="center">
             <template #default="{ row }">{{ row.enrollment_year ?? '—' }}</template>
           </el-table-column>
-          <el-table-column label="加入时间" width="120">
+          <el-table-column label="加入时间" min-width="170" align="center">
             <template #default="{ row }">{{ formatDate(row.joined_at) }}</template>
           </el-table-column>
-          <el-table-column prop="email" label="邮箱" min-width="150" />
-          <el-table-column label="操作" width="80">
+          <el-table-column label="操作" min-width="120" align="center">
             <template #default="{ row }">
               <el-button link type="danger" @click="removeStudent(row)">删除</el-button>
             </template>
@@ -623,6 +719,80 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="importDialog = false">关闭</el-button>
         <el-button type="primary" :loading="importing" @click="submitImport">开始导入</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="rosterDialog" title="一键获取学生名单（深职 i学习）" width="640px">
+      <el-alert
+        v-if="istudyStatus && !istudyStatus.available"
+        type="error"
+        :closable="false"
+        title="连不上 i学习 浏览器"
+        :description="istudyStatus.message"
+      />
+      <template v-else>
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="浏览器">
+            {{ istudyStatus?.browser || '检测中…' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="登录状态">
+            <el-tag v-if="istudyStatus" :type="istudyStatus.logged_in ? 'success' : 'danger'" size="small">
+              {{ istudyStatus.logged_in ? '已登录' : '未登录' }}
+            </el-tag>
+            <span v-else>检测中…</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="导入到本地课程">
+            {{ currentCourse?.name || '—' }}
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <div style="margin: 14px 0 6px">i学习 上的课程</div>
+        <el-select v-model="istudyCourseKey" style="width: 100%" placeholder="选择课程">
+          <el-option
+            v-for="item in istudyCourses"
+            :key="item.cid"
+            :label="item.name"
+            :value="`${item.cid}|${item.cpi}`"
+          />
+        </el-select>
+
+        <el-checkbox v-model="replaceBeforeImport" style="margin-top: 12px">
+          导入前先清空该课程现有名单（班级 / 学生 / 评分结果）
+        </el-checkbox>
+        <div class="muted" style="margin-top: 4px">
+          换学期换了一批学生时勾上；只在原有名单上补人时取消勾选。
+        </div>
+
+        <el-alert
+          v-if="syncSummary"
+          type="success"
+          :closable="false"
+          style="margin-top: 14px"
+          :title="syncSummary.message"
+        />
+        <el-table
+          v-if="syncSummary?.classes?.length"
+          :data="syncSummary.classes"
+          size="small"
+          style="margin-top: 10px"
+          max-height="200"
+        >
+          <el-table-column prop="class_name" label="班级" min-width="150" />
+          <el-table-column prop="count" label="抓到人数" width="90" />
+          <el-table-column prop="error" label="说明" min-width="180" />
+        </el-table>
+      </template>
+
+      <template #footer>
+        <el-button @click="rosterDialog = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="syncingRoster"
+          :disabled="!istudyStatus?.available || !istudyStatus?.logged_in"
+          @click="submitRosterSync"
+        >
+          开始导入
+        </el-button>
       </template>
     </el-dialog>
   </div>

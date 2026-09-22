@@ -22,9 +22,11 @@ from ..schemas import (
     LinkClassesRequest,
     LinkResult,
     LinkRubricsRequest,
+    RosterClearResult,
     RubricOut,
 )
 from ..serializers import class_out, course_out, rubric_out
+from ..services.roster_sync import clear_course_roster
 
 router = APIRouter(tags=["课程"])
 
@@ -247,3 +249,29 @@ def unlink_rubric(course_id: int, rubric_id: int, db: Session = Depends(get_db))
     db.delete(link)
     db.commit()
     return Response(status_code=204)
+
+
+@router.delete(
+    "/courses/{course_id}/roster",
+    response_model=RosterClearResult,
+    summary="清空课程名单（班级、学生、评分结果）",
+)
+def clear_roster(course_id: int, db: Session = Depends(get_db)) -> RosterClearResult:
+    """把该课程名下的班级、学生以及关联的评分结果全部清掉。
+
+    只挂在别的课程下的班级不受影响；同一个班级还挂在其它课程时只摘掉关联。
+    """
+    course = get_course_or_404(db, course_id)
+    summary = clear_course_roster(db, course)
+    db.commit()
+    return RosterClearResult(
+        course_id=course.id,
+        course_name=course.name,
+        classes_removed=summary.classes_removed,
+        students_removed=summary.students_removed,
+        results_removed=summary.results_removed,
+        message=(
+            f"课程「{course.name}」：已清空 {summary.classes_removed} 个班级、"
+            f"{summary.students_removed} 名学生、{summary.results_removed} 条评分结果"
+        ),
+    )

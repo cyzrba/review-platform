@@ -26,6 +26,9 @@ from ..schemas import (
 )
 from ..serializers import class_out, student_out
 from ..services.importer import ROSTER_TEMPLATE_CSV, ImportError_, parse_roster
+from ..services.roster_sync import import_rows as roster_import_rows
+from ..services.roster_sync import link_class_to_course
+from ..services.roster_sync import find_class as roster_find_class
 
 router = APIRouter(tags=["班级与学生"])
 
@@ -36,24 +39,12 @@ _CLASS_LOAD = (
 
 
 def _find_class(db: Session, department: str, major: str, name: str) -> Class | None:
-    return db.execute(
-        select(Class).where(
-            Class.department == department, Class.major == major, Class.name == name
-        )
-    ).scalars().first()
+    return roster_find_class(db, department, major, name)
 
 
 def _link_class_to_course(db: Session, course_id: int, class_id: int) -> bool:
     """把班级挂到课程下；已经挂过就返回 False。"""
-    exists = db.execute(
-        select(CourseClass.id).where(
-            CourseClass.course_id == course_id, CourseClass.class_id == class_id
-        )
-    ).scalars().first()
-    if exists is not None:
-        return False
-    db.add(CourseClass(course_id=course_id, class_id=class_id))
-    return True
+    return link_class_to_course(db, course_id, class_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,67 +83,23 @@ async def import_roster(
     except ImportError_ as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    result = ImportResult()
-    class_cache: dict[tuple[str, str, str], Class] = {}
-    linked = 0
-
-    for row in parsed.rows:
-        department = row.get("department") or ""
-        major = row.get("major") or ""
-        class_name = row.get("class_name") or ""
-        if not class_name:
-            result.skipped.append(
-                {"student_no": row["student_no"], "reason": "名单里缺少班级名称"}
-            )
-            continue
-
-        key = (department, major, class_name)
-        klass = class_cache.get(key)
-        if klass is None:
-            klass = _find_class(db, department, major, class_name)
-            if klass is None:
-                klass = Class(name=class_name, department=department, major=major)
-                db.add(klass)
-                db.flush()
-                result.classes_created += 1
-            if _link_class_to_course(db, course.id, klass.id):
-                linked += 1
-            class_cache[key] = klass
-
-        existing = db.execute(
-            select(Student).where(
-                Student.class_id == klass.id, Student.student_no == row["student_no"]
-            )
-        ).scalars().first()
-
-        payload = {
-            "name": row["name"],
-            "joined_at": row.get("joined_at"),
-            "enrollment_year": row.get("enrollment_year"),
-            "email": row.get("email"),
-        }
-        if existing is None:
-            db.add(Student(class_id=klass.id, student_no=row["student_no"], **payload))
-            result.students_created += 1
-            continue
-
-        changed = False
-        for field, value in payload.items():
-            if value is not None and getattr(existing, field) != value:
-                setattr(existing, field, value)
-                changed = True
-        if changed:
-            result.students_updated += 1
-
+    summary = roster_import_rows(db, course, parsed.rows)
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"导入冲突：{exc.orig}") from exc
 
+    result = ImportResult(
+        classes_created=summary.classes_created,
+        students_created=summary.students_created,
+        students_updated=summary.students_updated,
+        skipped=list(summary.skipped),
+    )
     result.message = (
-        f"课程「{course.name}」下：新增班级 {result.classes_created} 个（新挂 {linked} 个），"
-        f"新增学生 {result.students_created} 人，更新 {result.students_updated} 人，"
+        f"课程「{course.name}」下：新增班级 {summary.classes_created} 个"
+        f"（新挂 {summary.classes_linked} 个），"
+        f"新增学生 {summary.students_created} 人，更新 {summary.students_updated} 人，"
         f"跳过 {len(result.skipped) + len(parsed.warnings)} 行"
     )
     result.skipped.extend({"reason": warning} for warning in parsed.warnings)

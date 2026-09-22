@@ -43,12 +43,17 @@ engine = create_engine(
 
 
 if _is_sqlite:
+    # journal_mode 会写进 SQLite 文件本身，所以这个开关只在第一次连接时生效
+    _ALLOWED_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+    _journal_mode = settings.sqlite_journal_mode.strip().upper()
+    if _journal_mode not in _ALLOWED_JOURNAL_MODES:
+        _journal_mode = "DELETE"
 
     @event.listens_for(engine, "connect")
     def _sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA journal_mode={_journal_mode}")
         cursor.close()
 
 

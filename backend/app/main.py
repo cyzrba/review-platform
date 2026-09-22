@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .database import init_db
-from .routers import classes, courses, exports, files, grading, rubrics, system
+from .routers import classes, courses, exports, files, grading, istudy, rubrics, system
 from .services.grading import shutdown_executor
 
 logging.basicConfig(
@@ -62,7 +62,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     return JSONResponse(status_code=500, content={"detail": f"服务器内部错误：{exc}"})
 
 
-for module in (system, courses, classes, rubrics, grading, exports, files):
+for module in (system, courses, classes, rubrics, grading, exports, files, istudy):
     app.include_router(module.router, prefix=settings.api_prefix)
 
 

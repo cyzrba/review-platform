@@ -57,6 +57,14 @@ export const importRoster = (file, courseId) => {
 }
 export const rosterTemplateUrl = `${API_BASE}/classes/import/template`
 
+// ---------- i学习（名单抓取） ----------
+export const getIstudyStatus = () => http.get('/istudy/status').then((r) => r.data)
+export const listIstudyCourses = () => http.get('/istudy/courses').then((r) => r.data)
+export const importIstudyRoster = (payload) =>
+  http.post('/istudy/roster/import', payload).then((r) => r.data)
+export const clearCourseRoster = (courseId) =>
+  http.delete(`/courses/${courseId}/roster`).then((r) => r.data)
+
 // ---------- 评分细则 ----------
 export const listRubrics = (params = {}) => http.get('/rubrics', { params }).then((r) => r.data)
 export const getRubric = (id) => http.get(`/rubrics/${id}`).then((r) => r.data)

@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = f"sqlite:///{BACKEND_DIR / 'data' / 'review.db'}"
+    # SQLite 日志模式。DELETE = 每笔提交直接写主库文件（单机工具推荐，用数据库
+    # 工具随时打开都是最新的）；WAL = 先写 -wal 文件、性能好但主库会滞后。
+    sqlite_journal_mode: str = "DELETE"
 
     # 对象存储
     storage_backend: str = "minio"  # minio | local
@@ -41,6 +44,9 @@ class Settings(BaseSettings):
 
     # 上传
     max_upload_mb: int = 300
+
+    # i学习 抓取（借本机 Edge 调试端口读取登录态）
+    istudy_cdp_port: int = 9222
 
     # CORS，逗号分隔
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
