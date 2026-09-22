@@ -1,0 +1,26 @@
+# 可选：本地起一套 MinIO 用于开发/测试
+# 如果本机已经有 MinIO（例如 Docker Desktop 里的其它容器），直接用它们即可，不需要跑这个文件。
+#
+#   docker compose up -d
+#   控制台 http://localhost:9001 （minioadmin / minioadmin123）
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: review-platform-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:
