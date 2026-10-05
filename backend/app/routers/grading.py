@@ -17,6 +17,7 @@ from ..pagination import Page, PageParams, fetch_page, make_page, page_params
 from ..schemas import (
     GradeRunRequest,
     GradeRunResult,
+    GradingResultImageOut,
     GradingResultOut,
     GradingResultUpdate,
     UploadIssueOut,
@@ -32,7 +33,7 @@ from ..services.archive import (
     select_documents,
     trim_issues,
 )
-from ..services.grading import enqueue_grading, grade_result
+from ..services.grading import collect_answer_image_rows, enqueue_grading, grade_result
 from ..storage import get_storage
 from ..utils import guess_content_type, safe_filename, sha256_hex
 
@@ -334,6 +335,30 @@ def get_result(result_id: int, db: Session = Depends(get_db)) -> GradingResultOu
     if obj is None:
         raise HTTPException(status_code=404, detail="评分结果不存在")
     return result_out(obj)
+
+
+@router.get(
+    "/grading-results/{result_id}/images",
+    response_model=list[GradingResultImageOut],
+    summary="这条结果对应的作业图片（题面 + 学生作答）",
+)
+def get_result_images(
+    result_id: int, db: Session = Depends(get_db)
+) -> list[GradingResultImageOut]:
+    """复核时用：和喂给模型的是同一批图，方便对着图片看分数和评语。"""
+    result = db.get(GradingResult, result_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="评分结果不存在")
+    return [
+        GradingResultImageOut(
+            role=role,
+            filename=row.filename,
+            object_key=row.object_key,
+            content_type=row.content_type,
+            size_bytes=row.size_bytes,
+        )
+        for row, role in collect_answer_image_rows(db, result)
+    ]
 
 
 @router.patch(

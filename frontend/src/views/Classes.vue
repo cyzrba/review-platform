@@ -186,7 +186,7 @@ async function submitCourse() {
 
 async function removeCourse(item) {
   await ElMessageBox.confirm(
-    `删除课程「${item.name}」只会解除它和班级、评分细则的关联，不会删除班级和细则。确定吗？`,
+      `删除课程「${item.name}」？班级和评分细则会保留。`,
     '提示',
     { type: 'warning' },
   )
@@ -276,7 +276,7 @@ async function removeClassFromCourse(item) {
 
 async function removeClassEverywhere(item) {
   await ElMessageBox.confirm(
-    `彻底删除班级「${item.full_name}」会连同它的学生和评分结果一起删除，确定吗？`,
+      `彻底删除班级「${item.full_name}」？学生和评分结果会一并删除。`,
     '警告',
     { type: 'warning' },
   )
@@ -404,7 +404,7 @@ async function submitRosterSync() {
 async function clearRoster() {
   if (!courseId.value) return
   await ElMessageBox.confirm(
-    `清空课程「${currentCourse.value?.name}」下挂的全部班级、学生和评分结果？此操作不可恢复。`,
+      `清空课程「${currentCourse.value?.name}」的全部班级、学生和评分结果？`,
     '警告',
     { type: 'warning' },
   )
@@ -626,7 +626,7 @@ async function clearRoster() {
       <el-alert
         type="info"
         :closable="false"
-        title="班级按「院系 + 专业 + 班级名称」唯一，已存在时会直接挂到当前课程下"
+        title="班级按「院系 + 专业 + 名称」唯一，重复的会自动挂到本课程"
         style="margin-bottom: 14px"
       />
       <el-form label-width="90px">
@@ -702,7 +702,7 @@ async function clearRoster() {
       <el-alert
         type="info"
         :closable="false"
-        title="支持 .csv / .xlsx。表头需包含「学号/工号」和「姓名」，可选：院系、专业、班级、加入时间、入学年份"
+        title="支持 .csv / .xlsx，表头需含「学号」和「姓名」"
         style="margin-bottom: 14px"
       />
       <el-upload :auto-upload="false" :limit="1" :on-change="onImportFile" :show-file-list="true">
@@ -757,10 +757,10 @@ async function clearRoster() {
         </el-select>
 
         <el-checkbox v-model="replaceBeforeImport" style="margin-top: 12px">
-          导入前先清空该课程现有名单（班级 / 学生 / 评分结果）
+          导入前清空现有名单
         </el-checkbox>
         <div class="muted" style="margin-top: 4px">
-          换学期换了一批学生时勾上；只在原有名单上补人时取消勾选。
+          换学期换学生时勾上，补人时不用勾
         </div>
 
         <el-alert

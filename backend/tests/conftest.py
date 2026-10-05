@@ -10,7 +10,6 @@ from pathlib import Path
 _TMP = Path(tempfile.mkdtemp(prefix="review-platform-test-"))
 
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP / 'test.db'}"
-os.environ["STORAGE_BACKEND"] = "local"
 os.environ["LOCAL_STORAGE_DIR"] = str(_TMP / "objects")
 os.environ["AI_REVIEWER"] = "mock"
 

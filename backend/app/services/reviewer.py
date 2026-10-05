@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import settings
+from .llm_client import LLMError, ImagePart, build_messages, chat, parse_json_object
 
-PROMPT_VERSION = "v2-single-score"
+PROMPT_VERSION = "v3-vision-rubric"
 
 
 @dataclass(slots=True)
@@ -34,6 +35,8 @@ class ReviewContext:
     content_type: str | None
     file_bytes: bytes
     text: str | None = None  # 由评审器按需填充的文档正文
+    images: list[ImagePart] = field(default_factory=list)  # 题面 + 作答，按顺序
+    images_sent: int = 0
 
 
 @dataclass(slots=True)
@@ -44,6 +47,9 @@ class ReviewOutcome:
     prompt_version: str = PROMPT_VERSION
     duration_ms: int | None = None
     raw_response: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    images_sent: int = 0
 
 
 class BaseReviewer(ABC):
@@ -88,25 +94,57 @@ class MockReviewer(BaseReviewer):
             comment=f"[占位评审] {comment}（满分 {total:g}，本次 {score:g} 分）",
             model="mock-reviewer",
             prompt_version=PROMPT_VERSION,
+            images_sent=len(context.images),
         )
 
 
 class LLMReviewer(BaseReviewer):
-    """真实大模型评审（待实现）。
-
-    接入步骤：
-      1. `services.document.extract_text` 已经把文档正文放进 `context.text`；
-      2. 用 `build_prompt(context)`（或 `prompt_payload(context)`）组装 prompt；
-      3. 要求模型返回 JSON：
-         {"score": 88, "comment": "……"}
-      4. 把分数 clamp 到 [0, total_score]，组装成 ReviewOutcome 返回。
-    """
+    """真实大模型评审：把「题面图 + 学生作答图 + 评分细则」一起发给多模态模型。"""
 
     name = "llm"
 
-    def review(self, context: ReviewContext) -> ReviewOutcome:  # noqa: ARG002
-        raise NotImplementedError(
-            "真实 AI 评审尚未接入：请在 services/reviewer.py 的 LLMReviewer.review 里实现"
+    def review(self, context: ReviewContext) -> ReviewOutcome:
+        system_prompt = (
+            "你是一名严格但公正的大学课程助教，负责批改学生的作业。"
+            "你会拿到题目图片和学生的手写作答照片，请按老师给的评分细则打分。"
+            "只依据图片里实际写的内容给分，不要臆测学生没写的东西。"
+            "字迹潦草本身不扣分（除非评分细则里明确有书写分）。"
+        )
+        user_prompt = build_review_prompt(context)
+        messages = build_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            images=context.images,
+        )
+        result = chat(messages, images_sent=len(context.images))
+        payload = parse_json_object(result.text)
+
+        raw_score = payload.get("score")
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError) as exc:
+            raise LLMError(f"模型给的分数不是数字：{raw_score!r}") from exc
+        limit = context.total_score or 100.0
+        score = max(0.0, min(score, float(limit)))
+
+        comment = str(payload.get("comment") or "").strip()
+        breakdown = payload.get("breakdown")
+        if breakdown:
+            lines = [f"{item.get('item', '')}：{item.get('score', '')}".strip("：")
+                     for item in breakdown if isinstance(item, dict)]
+            if lines:
+                comment = "【分项】" + "；".join(lines) + "\n" + comment
+
+        return ReviewOutcome(
+            total_score=score,
+            comment=comment or "（模型没有给出评语）",
+            model=result.model,
+            prompt_version=PROMPT_VERSION,
+            duration_ms=result.duration_ms,
+            raw_response=result.text,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            images_sent=result.images_sent,
         )
 
 
@@ -128,8 +166,51 @@ def register_reviewer(name: str, reviewer_cls: type[BaseReviewer]) -> None:
     _REVIEWERS[name] = reviewer_cls
 
 
+def build_review_prompt(context: ReviewContext) -> str:
+    """多模态评审用的 prompt：题面在图片里，这里给文字部分。"""
+    kind_label = "实验报告" if context.kind == "lab_report" else "作业"
+    questions = [img for img in context.images if img.role == "question"]
+    answers = [img for img in context.images if img.role != "question"]
+
+    lines: list[str] = [
+        f"请批改《{context.rubric_name}》这份{kind_label}。",
+        "",
+        "【评分细则】",
+        context.criteria or "（老师没有填评分细则，请按题目要求的一般标准给分）",
+        "",
+        f"满分：{context.total_score:g} 分。",
+    ]
+    if context.rubric_description:
+        lines += ["", "【任务说明】", context.rubric_description]
+    if context.extra_prompt:
+        lines += ["", "【额外要求】", context.extra_prompt]
+
+    lines += ["", "【图片说明】"]
+    if questions:
+        lines.append(f"前 {len(questions)} 张是题目图片（题面）。")
+    if answers:
+        lines.append(f"后面 {len(answers)} 张是这位学生的手写作答。")
+    if not context.images:
+        lines.append("这次没有可用的图片。")
+
+    lines += [
+        "",
+        f"学生：{context.student_name}（{context.student_no}）",
+        "",
+        "请对照题面逐题检查学生的解答，按上面的评分细则打分，然后严格按下面的 JSON 返回，不要输出别的内容：",
+        '{"score": 分数, "breakdown": [{"item": "细则条目名", "score": 该项得分}], "comment": "评语"}',
+        "",
+        "要求：",
+        f"- score 是 0 到 {context.total_score:g} 之间的数字，可以带一位小数；",
+        "- breakdown 要覆盖评分细则里的每一条，分数加起来等于 score；",
+        "- comment 用中文写 2~4 句，说清楚「哪几点做到了、哪几点扣分、扣在哪一步」，要引用学生解答里的具体内容，不要写空话；",
+        "- 学生没写、写错、或者只写结论没有过程，都要在评语里指出来。",
+    ]
+    return "\n".join(lines)
+
+
 def build_prompt(context: ReviewContext) -> str:
-    """真实接入时可直接复用的 prompt 组装。"""
+    """纯文本评审用的 prompt（没有图片时的兜底）。"""
     kind_label = "实验报告" if context.kind == "lab_report" else "作业"
     lines: list[str] = [
         f"你是一名严格但公正的课程助教，正在批改学生的{kind_label}《{context.rubric_name}》。",

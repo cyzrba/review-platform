@@ -1,4 +1,4 @@
-"""文件下载：统一走服务端代理，前端不必直连 MinIO。"""
+"""文件下载：统一走服务端代理，前端不用关心文件到底存在哪。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def download(key: str = Query(..., description="对象存储 key")) -> Response:
     )
 
 
-@router.get("/files/url", response_model=FileUrlOut, summary="获取临时直链（MinIO 预签名）")
+@router.get("/files/url", response_model=FileUrlOut, summary="获取文件地址（本地存储时就是代理地址）")
 def file_url(
     key: str = Query(..., description="对象存储 key"),
     expires: int = Query(3600, ge=60, le=86400),

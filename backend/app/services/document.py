@@ -1,12 +1,13 @@
 """从提交文件里抽取纯文本，供 AI 评审使用。
 
-目前实现了纯文本 / Excel 类文件；PDF、Word 的解析留了明确的接入点，
-装上 pdfplumber / python-docx 后把对应分支补上即可。
+纯文本 / Excel 直接读；PDF 交给 PyMuPDF；i学习 导出的「答题记录 .doc」其实是
+Word 2003 XML（WordprocessingML），也从这里抽文字。
 """
 
 from __future__ import annotations
 
 import io
+import re
 
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".csv", ".json", ".xml", ".yml", ".yaml", ".log",
@@ -39,18 +40,29 @@ def extract_text(filename: str, content_type: str | None, data: bytes) -> str:
         return _truncate(_decode(data))
 
     if ext == ".pdf":
-        # TODO(AI 评审): 接入 pdfplumber
-        #   import pdfplumber, io
-        #   with pdfplumber.open(io.BytesIO(data)) as pdf:
-        #       return "\n".join(page.extract_text() or "" for page in pdf.pages)
-        raise DocumentParseError("PDF 文本抽取尚未接入（见 services/document.py 的 TODO）")
+        try:
+            import pymupdf
+        except ImportError as exc:  # pragma: no cover
+            raise DocumentParseError("没装 PyMuPDF，PDF 文本抽取不可用") from exc
+        try:
+            document = pymupdf.open(stream=data, filetype="pdf")
+        except Exception as exc:  # noqa: BLE001
+            raise DocumentParseError(f"PDF 打不开：{exc}") from exc
+        try:
+            return _truncate(
+                "\n".join(page.get_text().strip() for page in document)
+            )
+        finally:
+            document.close()
 
     if ext in {".docx", ".doc"}:
-        # TODO(AI 评审): 接入 python-docx
-        #   import docx
-        #   document = docx.Document(io.BytesIO(data))
-        #   return "\n".join(p.text for p in document.paragraphs)
-        raise DocumentParseError("Word 文本抽取尚未接入（见 services/document.py 的 TODO）")
+        # i学习 导出的 .doc 是 Word 2003 XML，文字在 <w:t> 里
+        try:
+            return _truncate(_word_xml_text(data))
+        except DocumentParseError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DocumentParseError(f"Word 文本抽取失败：{exc}") from exc
 
     if ext in {".xlsx", ".xlsm"}:
         from openpyxl import load_workbook
@@ -74,3 +86,23 @@ def _truncate(text: str) -> str:
     if len(text) <= MAX_CHARS:
         return text
     return text[:MAX_CHARS] + f"\n\n...[内容过长，已截断，共 {len(text)} 字]"
+
+
+_WORD_TEXT_RUN = re.compile(r"<w:t[^>]*>(.*?)</w:t>", re.S)
+_LONG_BASE64 = re.compile(r"[A-Za-z0-9+/=]{80,}")
+
+
+def _word_xml_text(data: bytes) -> str:
+    """从 Word 2003 XML（i学习 的「答题记录 .doc」）里抽文字。
+
+    图片是 base64 内嵌在 <w:binData> 里的，会混进文字节点，这里把长 base64 串清掉。
+    """
+    text = data.decode("utf-8-sig", errors="replace")
+    if "<w:wordDocument" not in text and "<w:binData" not in text:
+        raise DocumentParseError("这个 .doc 不是 Word 2003 XML，解析不了（建议用 .docx）")
+    pieces = [
+        re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", item)).strip()
+        for item in _WORD_TEXT_RUN.findall(text)
+    ]
+    body = _LONG_BASE64.sub(" ", " ".join(piece for piece in pieces if piece))
+    return re.sub(r"\s+", " ", body).strip()

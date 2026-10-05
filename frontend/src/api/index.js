@@ -65,6 +65,36 @@ export const importIstudyRoster = (payload) =>
 export const clearCourseRoster = (courseId) =>
   http.delete(`/courses/${courseId}/roster`).then((r) => r.data)
 
+// ---------- i学习（作业） ----------
+export const syncIstudyWorks = (payload) =>
+  http.post('/istudy/works/sync', payload).then((r) => r.data)
+export const listIstudyWorks = (params = {}) =>
+  http.get('/istudy/works', { params }).then((r) => r.data)
+export const exportIstudyWork = (workId, payload = {}) =>
+  http.post(`/istudy/works/${workId}/export`, payload).then((r) => r.data)
+export const getIstudyExport = (exportId) =>
+  http.get(`/istudy/exports/${exportId}`).then((r) => r.data)
+export const listIstudySubmissions = (workId) =>
+  http.get(`/istudy/works/${workId}/submissions`).then((r) => r.data)
+export const gradeIstudyWork = (workId, payload = {}) =>
+  http.post(`/istudy/works/${workId}/grade`, payload).then((r) => r.data)
+export const compareIstudyStudents = (workId) =>
+  http.get(`/istudy/works/${workId}/students`).then((r) => r.data)
+
+// ---------- i学习（实验报告） ----------
+export const syncIstudyLabReports = (payload) =>
+  http.post('/istudy/lab-reports/sync', payload).then((r) => r.data)
+export const listIstudyLabReports = (params = {}) =>
+  http.get('/istudy/lab-reports', { params }).then((r) => r.data)
+export const exportIstudyLabReport = (reportId, payload = {}) =>
+  http.post(`/istudy/lab-reports/${reportId}/export`, payload).then((r) => r.data)
+export const listIstudyLabSubmissions = (reportId) =>
+  http.get(`/istudy/lab-reports/${reportId}/submissions`).then((r) => r.data)
+export const compareIstudyLabStudents = (reportId) =>
+  http.get(`/istudy/lab-reports/${reportId}/students`).then((r) => r.data)
+export const gradeIstudyLabReport = (reportId, payload = {}) =>
+  http.post(`/istudy/lab-reports/${reportId}/grade`, payload).then((r) => r.data)
+
 // ---------- 评分细则 ----------
 export const listRubrics = (params = {}) => http.get('/rubrics', { params }).then((r) => r.data)
 export const getRubric = (id) => http.get(`/rubrics/${id}`).then((r) => r.data)
@@ -91,6 +121,8 @@ export const classSummary = (rubricId, params = {}) =>
 export const updateResult = (resultId, payload) =>
   http.patch(`/grading-results/${resultId}`, payload).then((r) => r.data)
 export const deleteResult = (resultId) => http.delete(`/grading-results/${resultId}`)
+export const getResultImages = (resultId) =>
+  http.get(`/grading-results/${resultId}/images`).then((r) => r.data)
 export const uploadHint = (rubricId) => http.get(`/rubrics/${rubricId}/upload-hint`).then((r) => r.data)
 
 // ---------- 导出与文件 ----------

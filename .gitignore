@@ -1,23 +1,64 @@
-# Python
+# ============================================================================
+#  Git 忽略规则
+#  凡是「只在你本机有意义」的东西都不进仓库 —— 依赖、本地数据、密钥、
+#  工具的工作目录、一次性脚本。换台电脑 clone 下来就能直接跑。
+# ============================================================================
+
+# ---------- Python ----------
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.coverage
+htmlcov/
 
-# 本地数据
+# ---------- Node ----------
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-error.log*
+
+# ---------- 本地数据（数据库 + 抓下来的作业 / 实验报告） ----------
+# 动辄几个 GB，而且是「本机跑出来的结果」，不进版本库。
+# 要搬家就直接拷 backend/data/ 整个目录（库里存的是相对 key，换盘符不影响）。
 backend/data/
 *.db
 *.db-wal
 *.db-shm
 
-# 环境变量
+# ---------- 环境变量 ----------
+# .env 里是数据库路径 / 大模型 key，只提交 .env.example
 .env
+.env.local
+.env.*.local
 
-# Node
-node_modules/
-dist/
-
-# 系统
-.DS_Store
+# ---------- 编辑器与工具的工作目录 ----------
+.kilo/
+.kilocode/
 .idea/
 .vscode/
+*.swp
+*~
+
+# ---------- 探针脚本 ----------
+# 摸 i学习 接口用的一次性脚本（里面有写死的本机路径和临时下载的样例包），不进仓库
+_scratch/
+
+# ---------- 日志与临时产物 ----------
+*.log
+*.err
+*.tmp
+*.bak
+*.orig
+*.rej
+errorlevel
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db
+Desktop.ini

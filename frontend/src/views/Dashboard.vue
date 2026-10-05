@@ -3,12 +3,14 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
-import { getDashboard, listRubrics } from '@/api'
+import { getDashboard, getIstudyStatus, listRubrics } from '@/api'
 
 const router = useRouter()
 const loading = ref(true)
 const data = ref(null)
 const rubrics = ref([])
+const istudy = ref(null)
+const istudyLoading = ref(false)
 
 async function load() {
   loading.value = true
@@ -27,6 +29,30 @@ async function load() {
 }
 
 onMounted(load)
+
+/** i学习 浏览器状态单独查：它要连本机 Edge 的调试端口，比别的接口慢，不拖着整页加载。 */
+async function loadIstudy() {
+  istudyLoading.value = true
+  try {
+    istudy.value = await getIstudyStatus()
+  } catch (error) {
+    istudy.value = {
+      available: false,
+      logged_in: false,
+      message: `查询失败：${error.message}`,
+    }
+  } finally {
+    istudyLoading.value = false
+  }
+}
+
+onMounted(loadIstudy)
+
+/** 顶部「刷新」把整页都刷一遍，包含 i学习 连接状态。 */
+function refreshAll() {
+  load()
+  loadIstudy()
+}
 </script>
 
 <template>
@@ -35,10 +61,10 @@ onMounted(load)
       <div>
         <h2 class="page-title">概览</h2>
         <div class="page-subtitle">
-          导入名单 → 建评分细则 → 上传压缩包 → AI 评审 → 导出成绩与评语
+          从 i学习 抓名单与作业 → AI 评审 → 导出成绩与评语
         </div>
       </div>
-      <el-button @click="load">刷新</el-button>
+      <el-button @click="refreshAll">刷新</el-button>
     </div>
 
     <div class="stat-grid" v-if="data">
@@ -87,9 +113,28 @@ onMounted(load)
       </el-descriptions>
     </div>
 
+    <div class="table-card" style="margin-bottom: 16px" v-loading="istudyLoading">
+      <div class="toolbar" style="margin-bottom: 0">
+        <span style="font-weight: 600">i学习 浏览器</span>
+        <template v-if="istudy">
+          <el-tag :type="istudy.available ? 'success' : 'danger'" size="small">
+            {{ istudy.available ? '已连接' : '未连接' }}
+          </el-tag>
+          <el-tag
+            v-if="istudy.available"
+            :type="istudy.logged_in ? 'success' : 'warning'"
+            size="small"
+          >
+            {{ istudy.logged_in ? '已登录' : '未登录' }}
+          </el-tag>
+        </template>
+        <el-button link type="primary" @click="loadIstudy">重新检测</el-button>
+      </div>
+    </div>
+
     <div class="table-card">
       <div style="font-weight: 600; margin-bottom: 12px">评分细则</div>
-      <el-table :data="rubrics" empty-text="还没有评分细则，先去「评分细则」页新建一个">
+      <el-table :data="rubrics" empty-text="还没有评分细则">
         <el-table-column prop="name" label="项目 / 作业" min-width="220">
           <template #default="{ row }">
             <el-link type="primary" @click="router.push(`/grading/${row.id}`)">{{ row.name }}</el-link>

@@ -13,6 +13,8 @@ from .config import settings
 from .database import init_db
 from .routers import classes, courses, exports, files, grading, istudy, rubrics, system
 from .services.grading import shutdown_executor
+from .services.homework_sync import shutdown_export_executor
+from .services.lab_sync import reset_stale_sync_states, shutdown_report_executor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +27,13 @@ logger = logging.getLogger("review-platform")
 async def lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
     try:
+        # 上次没跑完的抓取任务会卡在「正在下载」，启动时收个尾，允许重新抓
+        stale = reset_stale_sync_states()
+        if stale:
+            logger.info("把 %s 条卡住的实验报告抓取任务标成失败", stale)
+    except Exception:  # noqa: BLE001
+        logger.exception("重置实验报告抓取状态失败")
+    try:
         from .storage import get_storage
 
         storage = get_storage()
@@ -34,6 +43,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.warning("对象存储初始化失败（上传时会报错）：%s", exc)
     yield
     shutdown_executor()
+    shutdown_export_executor()
+    shutdown_report_executor()
 
 
 app = FastAPI(

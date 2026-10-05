@@ -6,7 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import GradingKind, ResultStatus
+from .models import ExportStatus, FileState, GradingKind, ResultStatus, SubmissionState, WorkStatus
 
 
 class ORMModel(BaseModel):
@@ -201,6 +201,9 @@ class GradingResultOut(ORMModel):
     model: str | None = None
     graded_at: datetime | None = None
     duration_ms: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    images_sent: int | None = None
     is_manual: bool = False
     error_message: str | None = None
     created_at: datetime
@@ -211,6 +214,16 @@ class GradingResultUpdate(BaseModel):
 
     score: float | None = None
     comment: str | None = None
+
+
+class GradingResultImageOut(BaseModel):
+    """复核时给学生看的图：题面 + 他自己的作答。"""
+
+    role: str = Field("answer", description="question 题面 / answer 作答")
+    filename: str
+    object_key: str
+    content_type: str | None = None
+    size_bytes: int = 0
 
 
 class UploadIssueOut(BaseModel):
@@ -242,6 +255,7 @@ class GradeRunRequest(BaseModel):
 class GradeRunResult(BaseModel):
     queued: int
     result_ids: list[int] = Field(default_factory=list)
+    rubric_id: int | None = Field(None, description="这次评审实际用的评分细则")
     message: str = ""
 
 
@@ -334,4 +348,197 @@ class RosterClearResult(BaseModel):
     classes_removed: int = 0
     students_removed: int = 0
     results_removed: int = 0
+    message: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# i学习 作业
+# --------------------------------------------------------------------------- #
+class IstudyWorkSyncRequest(BaseModel):
+    course_id: int = Field(..., description="同步到本地哪个课程下")
+    cid: str | None = Field(None, description="i学习 课程 id；不传则用课程已绑定的")
+    cpi: str | None = Field(None, description="i学习 课程 cpi")
+
+
+class IstudyExportOut(ORMModel):
+    id: int
+    work_id: int
+    content: int = 0
+    fmt: int = 1
+    status: ExportStatus = ExportStatus.queued
+    istudy_download_id: str | None = None
+    size_bytes: int = 0
+    file_count: int = 0
+    message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+
+
+class IstudyWorkClassOut(BaseModel):
+    """作业在某个班下的实例。"""
+
+    source: str = Field("work", description="work=作业 / lab=实验报告")
+    work_id: int = Field(..., description="本地 istudy_works.id")
+    class_id: int | None = None
+    class_name: str = ""
+    rubric_id: int | None = None
+    istudy_clazzid: str = ""
+    istudy_work_id: str = ""
+    report_type: int | None = Field(None, description="实验报告：1 表单 / 2 附件 / 3 Word 模板")
+    status: WorkStatus = WorkStatus.ongoing
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    submitted_count: int = 0
+    unsubmitted_count: int = 0
+    pending_count: int = 0
+    captured_count: int = Field(0, description="本地已经抓到文件的人数")
+    missing_count: int = Field(0, description="本地判定为未交的人数")
+    image_count: int = Field(0, description="抓到的作答图片数")
+    result_count: int = Field(0, description="这个班已有的评分结果")
+    graded_count: int = Field(0, description="这个班已评审条数")
+    last_export: IstudyExportOut | None = None
+    sync_state: str | None = Field(None, description="实验报告：抓附件的进度")
+    sync_message: str | None = Field(None, description="实验报告：抓附件的说明")
+
+
+class IstudyWorkGroupOut(BaseModel):
+    """列表里的一行：一次作业（可能发给了多个班）。"""
+
+    source: str = Field("work", description="work=作业 / lab=实验报告")
+    name: str
+    library_id: str | None = Field(None, description="i学习 作业题库 id，一次作业的唯一标识")
+    task_ids: list[str] = Field(default_factory=list)
+    rubric_ids: list[int] = Field(default_factory=list, description="这一行关联到的评分细则")
+    status: WorkStatus | None = None
+    status_breakdown: dict[str, int] = Field(default_factory=dict)
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    class_count: int = 0
+    rubric_id: int | None = None
+    submitted_count: int = 0
+    unsubmitted_count: int = 0
+    pending_count: int = 0
+    captured_count: int = 0
+    missing_count: int = 0
+    image_count: int = 0
+    result_count: int = 0
+    graded_count: int = 0
+    classes: list[IstudyWorkClassOut] = Field(default_factory=list)
+
+
+class IstudyWorkListOut(BaseModel):
+    items: list[IstudyWorkGroupOut] = Field(default_factory=list)
+    total: int = 0
+    last_synced_at: datetime | None = None
+
+
+class IstudyWorkSyncResult(BaseModel):
+    course_id: int
+    course_name: str
+    source_course_name: str = ""
+    scraped_works: int = 0
+    created: int = 0
+    updated: int = 0
+    class_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
+class IstudyExportRequest(BaseModel):
+    content: int = Field(0, ge=0, le=2, description="0 完整答题记录 / 1 仅提交附件 / 2 仅留痕批注")
+    fmt: int = Field(1, ge=0, le=1, description="0 Word / 1 PDF")
+    person_ids: list[str] | None = Field(
+        None, description="只导出这几个学生（i学习 的用户 id）；不传就整班导出"
+    )
+
+
+class IstudyStudentCompareOut(BaseModel):
+    """i学习 已交名单 vs 本地已抓，一行一个学生。"""
+
+    student_no: str
+    name: str = ""
+    istudy_user_id: str | None = Field(None, description="按人导出时要用它")
+    answer_id: str | None = None
+    submitted_at: str | None = Field(None, description="i学习 上的提交时间")
+    state: str = Field(
+        "new", description="new 还没抓 / fetched 已抓 / not_submitted 没交 / not_in_roster 名单里没有"
+    )
+    fetched: bool = False
+    in_roster: bool = True
+    image_count: int = 0
+
+
+class IstudyWorkCompareOut(BaseModel):
+    work_id: int
+    work_name: str
+    class_id: int | None = None
+    class_name: str = ""
+    istudy_submitted: int = Field(0, description="i学习 上已交人数")
+    local_fetched: int = Field(0, description="本地已抓人数")
+    new_count: int = Field(0, description="还没抓的人数")
+    students: list[IstudyStudentCompareOut] = Field(default_factory=list)
+
+
+class IstudyGradeRequest(BaseModel):
+    """「一键 AI 评审」弹窗里选的东西。"""
+
+    rubric_id: int | None = Field(
+        None, description="本次评审用哪一份评分细则；不传就用这次作业默认绑定的那份"
+    )
+    class_id: int | None = Field(None, description="只评审某个班级；不传就是这次作业的所有班")
+    force: bool = Field(False, description="已评审的也重新评一遍")
+
+
+class IstudySubmissionOut(BaseModel):
+    id: int
+    student_id: int
+    student_no: str = ""
+    student_name: str = ""
+    class_name: str = ""
+    state: SubmissionState = SubmissionState.missing
+    file_state: FileState = FileState.none
+    submitted_at: datetime | None = None
+    source_filename: str | None = None
+    object_key: str | None = None
+    size_bytes: int = 0
+    image_count: int = 0
+    error_message: str | None = None
+    image_keys: list[str] = Field(default_factory=list, description="作答图片的 object key，按顺序")
+
+
+# --------------------------------------------------------------------------- #
+# i学习 实验报告
+# --------------------------------------------------------------------------- #
+class IstudyLabSyncRequest(BaseModel):
+    course_id: int = Field(..., description="同步到本地哪个课程下")
+    cid: str | None = Field(None, description="i学习 课程 id；不传则用课程已绑定的")
+    cpi: str | None = Field(None, description="i学习 课程 cpi")
+
+
+class IstudyLabSyncResult(BaseModel):
+    course_id: int
+    course_name: str
+    source_course_name: str = ""
+    scraped_reports: int = Field(0, description="抓到的「报告 × 班级」条数")
+    experiment_count: int = Field(0, description="去重后的实验个数")
+    created: int = 0
+    updated: int = 0
+    class_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
+class IstudyLabExportRequest(BaseModel):
+    """抓某次实验报告的作答。"""
+
+    student_ids: list[str] | None = Field(
+        None, description="只抓这几个人（i学习 的 fillId）；不传就抓还没抓过的人"
+    )
+    force: bool = Field(False, description="已经抓过的也重新抓一遍")
+
+
+class IstudyLabExportResult(BaseModel):
+    report_id: int
+    queued: int = 0
     message: str = ""

@@ -1,13 +1,7 @@
-"""进程内冒烟：跑一遍完整流程，按当前 .env / 环境变量选择存储后端。
+"""进程内冒烟：跑一遍完整流程（文件落本地磁盘，由 .env 的 LOCAL_STORAGE_DIR 决定位置）。
 
 用法：
-    # 本地磁盘（不需要 MinIO）
-    ./.venv/bin/python scripts/smoke_test.py
-
-    # 本地 MinIO
-    STORAGE_BACKEND=minio MINIO_ENDPOINT=localhost:9000 \
-    MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin123 \
-    ./.venv/bin/python scripts/smoke_test.py
+    ./.venv/Scripts/python.exe scripts/smoke_test.py
 """
 
 from __future__ import annotations
