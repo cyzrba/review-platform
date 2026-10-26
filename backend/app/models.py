@@ -343,6 +343,18 @@ class GradingResult(Base, TimestampMixin):
     is_manual: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment="是否人工调整过分数或评语"
     )
+    istudy_backfill_status: Mapped[str | None] = mapped_column(
+        String(16), comment="回填 i学习：success / failed"
+    )
+    istudy_backfill_score: Mapped[float | None] = mapped_column(
+        Float, comment="已回填到 i学习 的总分"
+    )
+    istudy_backfilled_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近一次回填 i学习 的时间"
+    )
+    istudy_backfill_message: Mapped[str | None] = mapped_column(
+        Text, comment="回填失败原因 / 服务端回执"
+    )
 
     rubric: Mapped["Rubric"] = relationship(back_populates="results")
     student: Mapped["Student"] = relationship(back_populates="results")

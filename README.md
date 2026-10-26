@@ -384,18 +384,38 @@ istudy/works/{班级}-{作业名}/students/{学号}/answer/{seq}-{名字}  抽�
 图片的 `role` 会自动标：同一个作业里多个人都有的那张图基本是老师发的题面（`question`），
 其余算学生作答（`answer`）。
 
-### 只读，不会把成绩写回 i学习
+### 回填分数到 i学习（需要老师二次确认）
 
-整个 `services/istudy.py` 里对 i学习 的请求**全是 GET**，没有任何 POST / PUT / 上传成绩的调用：
+抓取链路本身仍然只读；只有老师在「i学习 作业」那张卡片里点 **回填分数**，并且在弹窗里
+确认后，才会把本地 `grading_results` 的分数和评语写回 i学习：
 
 ```
-portal / coursegroupdata / opencoursenewfy / clazz-manage / clazz-student /
-personexcel / work/list / work/mark / work/packWork / tcm/downloadcenter / workzip
+GET  /mooc2-ans/work/library/review-work?...   打开某个学生的批阅页，取 form1 的隐藏字段
+POST /mooc2-ans/work/library/save-review?...   总分 + 单题分 + 评语一起提交
 ```
 
-唯一算「产生副作用」的是 `work/packWork` —— 它只是在老师自己的下载中心里生成一个打包任务，
-不涉及学生成绩。AI 评审（含 mock）的结果只写本地 SQLite 的 `grading_results`，
-接真实大模型时也是发给模型服务商，跟 i学习 没有任何关系。
+`enc` / `uploadEnc` / `uploadTimeStamp` 这些校验值都由服务端渲染在批阅页表单里，
+不需要自己算；同一次作业的 `enc` 所有人相同，`uploadEnc` 和单题 id 是每人不同的。
+
+弹窗会先给出预览：每个学生的本地分数、评语、i学习 当前状态，以及这一条是「写入」还是
+「跳过」。预览同时显示 i学习 上**已经批阅过的分数**（待批阅的显示 `—`），本地分数和
+i学习 分数不一致时用橙色标出，方便判断要不要覆盖。默认只写 `待批阅` 的作业，
+已批阅的要显式勾选「覆盖 i学习 已批阅的」。
+多题作业会把总分按各题满分比例拆成单题分，尾差补到最后一题，保证求和等于总分。
+每写完一个人都会把结果记进 `grading_results.istudy_backfill_*`，失败会带上原因，
+可以刷新预览后重试。
+
+实验报告（`/lab/#/...` 那套 SPA）目前还没有接回填，按钮只对「作业」可用。
+
+### 删除本地附件
+
+「提交明细」里可以按学生删除附件，也可以一次清空本班这次作业的全部附件。
+**只删本机磁盘上的文件，i学习 上学生的提交不受影响。**
+
+- 默认保留评分结果（分数、评语、回填记录都在），只是复核图片和重新评审需要重新下载
+- 勾选「同时删除对应的评分结果」才会把分数和评语一起删掉
+- 删除后提交记录会回到 `file_state=none`，作业列表的「已抓」人数随之减少，
+  下次按人抓取时这些人会重新出现在待抓列表里
 
 ## i学习 实验报告抓取
 
@@ -463,6 +483,10 @@ personexcel / work/list / work/mark / work/packWork / tcm/downloadcenter / workz
 | `POST` | `/api/istudy/works/{id}/export` | **抓这次作业的附件**（异步任务，返回任务 id） |
 | `GET` | `/api/istudy/exports/{id}` | 导出任务进度 |
 | `GET` | `/api/istudy/works/{id}/submissions` | 这次作业下每个学生的提交与作答图片 |
+| `POST` | `/api/istudy/works/{id}/backfill/preview` | **回填预览**：分数、评语、i学习 状态、将写还是跳过 |
+| `POST` | `/api/istudy/works/{id}/backfill` | **把选中的学生分数 / 评语写回 i学习** |
+| `DELETE` | `/api/istudy/submissions/{id}/files` | 删除某个学生的本地附件（`also_result` 可选） |
+| `DELETE` | `/api/istudy/works/{id}/files` | 清空某班这次作业的本地附件 |
 | `POST` | `/api/istudy/lab-reports/sync` | **同步实验报告列表**（我教的课 → 课程 → 实验报告） |
 | `GET` | `/api/istudy/lab-reports` | 实验报告列表，按实验名归并（可按 `class_id` / `status` 筛选） |
 | `POST` | `/api/istudy/lab-reports/{id}/export` | **抓这次实验报告的作答**（`student_ids` 指定人，`force` 重抓） |

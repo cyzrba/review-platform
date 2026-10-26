@@ -28,10 +28,15 @@ from ..models import (
 )
 from ..schemas import (
     GradeRunResult,
+    IstudyBackfillApplyRequest,
+    IstudyBackfillPreviewOut,
+    IstudyBackfillPreviewRequest,
+    IstudyBackfillResultOut,
     IstudyClassCount,
     IstudyCourseOut,
     IstudyExportOut,
     IstudyExportRequest,
+    IstudyFileDeleteResult,
     IstudyGradeRequest,
     IstudyLabExportRequest,
     IstudyLabExportResult,
@@ -48,7 +53,7 @@ from ..schemas import (
     IstudyWorkSyncRequest,
     IstudyWorkSyncResult,
 )
-from ..services import homework_sync, lab_sync
+from ..services import backfill, homework_sync, lab_sync
 from ..services.grading import enqueue_grading
 from ..services.istudy import IstudyClient, IstudyError
 from ..services.roster_sync import import_rows
@@ -433,6 +438,89 @@ def istudy_grade_work(
     return GradeRunResult(
         queued=len(result_ids), result_ids=result_ids, rubric_id=rubric.id, message=message
     )
+
+
+@router.post(
+    "/istudy/works/{work_id}/backfill/preview",
+    response_model=IstudyBackfillPreviewOut,
+    summary="预览把本地分数 / 评语回填到 i学习（不写入）",
+)
+async def istudy_backfill_preview(
+    work_id: int,
+    payload: IstudyBackfillPreviewRequest | None = None,
+    db: Session = Depends(get_db),
+) -> IstudyBackfillPreviewOut:
+    work = db.get(IstudyWork, work_id)
+    if work is None:
+        raise HTTPException(status_code=404, detail="作业不存在，请先同步作业列表")
+    request = payload or IstudyBackfillPreviewRequest()
+    try:
+        plan = await backfill.build_preview(
+            db, work, class_id=request.class_id, overwrite=request.overwrite
+        )
+    except IstudyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return IstudyBackfillPreviewOut(**plan)
+
+
+@router.post(
+    "/istudy/works/{work_id}/backfill",
+    response_model=IstudyBackfillResultOut,
+    summary="把选中的学生分数 / 评语写回 i学习",
+)
+async def istudy_backfill_apply(
+    work_id: int,
+    payload: IstudyBackfillApplyRequest,
+    db: Session = Depends(get_db),
+) -> IstudyBackfillResultOut:
+    work = db.get(IstudyWork, work_id)
+    if work is None:
+        raise HTTPException(status_code=404, detail="作业不存在，请先同步作业列表")
+    try:
+        result = await backfill.apply_backfill(
+            db,
+            work,
+            student_ids=payload.student_ids,
+            overwrite=payload.overwrite,
+            write_comment=payload.write_comment,
+        )
+    except IstudyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return IstudyBackfillResultOut(**result)
+
+
+@router.delete(
+    "/istudy/submissions/{submission_id}/files",
+    response_model=IstudyFileDeleteResult,
+    summary="删除某个学生的本地附件（不影响 i学习 上的提交）",
+)
+def istudy_delete_submission_files(
+    submission_id: int,
+    also_result: bool = Query(False, description="同时删除对应的评分结果"),
+    db: Session = Depends(get_db),
+) -> IstudyFileDeleteResult:
+    row = db.get(IstudySubmission, submission_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="提交记录不存在")
+    result = homework_sync.delete_submission_files(db, row, also_result=also_result)
+    return IstudyFileDeleteResult(**result)
+
+
+@router.delete(
+    "/istudy/works/{work_id}/files",
+    response_model=IstudyFileDeleteResult,
+    summary="清空某个班这次作业的本地附件（不影响 i学习）",
+)
+def istudy_delete_work_files(
+    work_id: int,
+    also_result: bool = Query(False, description="同时删除这些学生的评分结果"),
+    db: Session = Depends(get_db),
+) -> IstudyFileDeleteResult:
+    work = db.get(IstudyWork, work_id)
+    if work is None:
+        raise HTTPException(status_code=404, detail="作业不存在")
+    result = homework_sync.delete_work_files(db, work, also_result=also_result)
+    return IstudyFileDeleteResult(**result)
 
 
 @router.get(

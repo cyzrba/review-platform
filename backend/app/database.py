@@ -97,6 +97,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "prompt_tokens": "INTEGER",
         "completion_tokens": "INTEGER",
         "images_sent": "INTEGER",
+        "istudy_backfill_status": "VARCHAR(16)",
+        "istudy_backfill_score": "FLOAT",
+        "istudy_backfilled_at": "DATETIME",
+        "istudy_backfill_message": "TEXT",
     },
 }
 
@@ -125,7 +129,16 @@ _EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
     "classes": ("department",),
     "students": ("enrollment_year",),
     "rubrics": ("criteria", "istudy_task_id", "istudy_library_id", "source"),
-    "grading_results": ("object_key", "prompt_tokens", "completion_tokens", "images_sent"),
+    "grading_results": (
+        "object_key",
+        "prompt_tokens",
+        "completion_tokens",
+        "images_sent",
+        "istudy_backfill_status",
+        "istudy_backfill_score",
+        "istudy_backfilled_at",
+        "istudy_backfill_message",
+    ),
     "courses": ("istudy_cid", "istudy_cpi"),
     "istudy_works": ("istudy_library_id",),
     "istudy_exports": ("person_ids",),

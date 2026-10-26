@@ -542,3 +542,68 @@ class IstudyLabExportResult(BaseModel):
     report_id: int
     queued: int = 0
     message: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# i学习 作业：把本地分数 / 评语回填到批阅页
+# --------------------------------------------------------------------------- #
+class IstudyBackfillPreviewRequest(BaseModel):
+    class_id: int | None = Field(None, description="只看某个本地班级；不传就是这次作业的所有班")
+    overwrite: bool = Field(False, description="i学习 上已经批阅过的也覆盖")
+
+
+class IstudyBackfillRow(BaseModel):
+    student_id: int | None = None
+    student_no: str = ""
+    student_name: str = ""
+    class_id: int | None = None
+    class_name: str = ""
+    work_id: int
+    answer_id: str = ""
+    local_score: float | None = None
+    local_comment: str | None = None
+    istudy_state: str = ""
+    istudy_score: float | None = Field(None, description="i学习 上已经批阅的分数")
+    action: str = Field("skip", description="write=会写入 / skip=跳过")
+    reason: str = ""
+    backfill_status: str | None = Field(None, description="上一次回填结果：success / failed")
+
+
+class IstudyBackfillPreviewOut(BaseModel):
+    work_id: int
+    work_name: str
+    class_id: int | None = None
+    overwrite: bool = False
+    rows: list[IstudyBackfillRow] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
+class IstudyBackfillApplyRequest(BaseModel):
+    student_ids: list[int] = Field(..., description="要写入的本地学生 id（前端按预览结果勾选）")
+    overwrite: bool = Field(False, description="i学习 上已经批阅过的也覆盖")
+    write_comment: bool = Field(True, description="是否把 AI 评语一并写入")
+
+
+class IstudyBackfillReceipt(BaseModel):
+    student_id: int
+    student_no: str = ""
+    student_name: str = ""
+    ok: bool = False
+    score: float | None = None
+    message: str = ""
+
+
+class IstudyBackfillResultOut(BaseModel):
+    work_id: int
+    work_name: str = ""
+    receipts: list[IstudyBackfillReceipt] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
+class IstudyFileDeleteResult(BaseModel):
+    """删除本地附件的结果（只动本地文件，不影响 i学习）。"""
+
+    submissions: int = 0
+    files: int = 0
+    freed_bytes: int = 0
+    results_deleted: int = 0

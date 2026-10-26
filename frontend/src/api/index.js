@@ -78,6 +78,20 @@ export const listIstudySubmissions = (workId) =>
   http.get(`/istudy/works/${workId}/submissions`).then((r) => r.data)
 export const gradeIstudyWork = (workId, payload = {}) =>
   http.post(`/istudy/works/${workId}/grade`, payload).then((r) => r.data)
+export const previewIstudyBackfill = (workId, payload = {}) =>
+  http.post(`/istudy/works/${workId}/backfill/preview`, payload).then((r) => r.data)
+export const applyIstudyBackfill = (workId, payload) =>
+  http.post(`/istudy/works/${workId}/backfill`, payload).then((r) => r.data)
+export const deleteIstudySubmissionFiles = (submissionId, alsoResult = false) =>
+  http
+    .delete(`/istudy/submissions/${submissionId}/files`, {
+      params: { also_result: alsoResult },
+    })
+    .then((r) => r.data)
+export const deleteIstudyWorkFiles = (workId, alsoResult = false) =>
+  http
+    .delete(`/istudy/works/${workId}/files`, { params: { also_result: alsoResult } })
+    .then((r) => r.data)
 export const compareIstudyStudents = (workId) =>
   http.get(`/istudy/works/${workId}/students`).then((r) => r.data)
 

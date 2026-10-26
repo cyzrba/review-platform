@@ -43,7 +43,9 @@ import json
 import logging
 import re
 import time
+from html import unescape as _unescape
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import websockets
@@ -61,6 +63,8 @@ WORK_LIST = f"{MOOC_BASE}/mooc2-ans/work/list"
 WORK_MARK = f"{MOOC_BASE}/mooc2-ans/work/mark"
 WORK_MARK_LIST = f"{MOOC_BASE}/mooc2-ans/work/mark-list"
 WORK_PACK = f"{MOOC_BASE}/mooc2-ans/work/packWork"
+WORK_REVIEW = f"{MOOC_BASE}/mooc2-ans/work/library/review-work"
+WORK_SAVE_REVIEW = f"{MOOC_BASE}/mooc2-ans/work/library/save-review"
 DOWNLOAD_CENTER = f"{MOOC_BASE}/mooc2-ans/tcm/downloadcenter"
 LAB_API = f"{MOOC_BASE}/lab/api/labTemplate"
 
@@ -221,12 +225,21 @@ def parse_mark_list(html: str) -> tuple[list[dict[str, str]], int]:
 
     已交的行长这样：``<ul class="dataBody_td" id="9936126" createid="18600001919017">``，
     ``createid`` 就是 i学习 的用户 id —— 只导出指定学生时 ``personIds`` 用的就是它。
+    行里还有一个 ``scoreInput`` 输入框，``value`` 就是 i学习 上已有的分数（未批阅时为空）。
     返回 (学生列表, 总页数)。
     """
     total_page = re.search(r'id="totalPage" value="(\d+)"', html)
     students: list[dict[str, str]] = []
     for answer_id, create_id, body in _MARK_ROW.findall(html):
         cells = [_text_of(item) for item in _MARK_LI.findall(body)]
+        score_input = re.search(
+            r'<input[^>]*class="[^"]*scoreInput[^"]*"[^>]*>', body, re.I
+        )
+        score_value = (
+            re.search(r'value="([^"]*)"', score_input.group(0), re.I)
+            if score_input
+            else None
+        )
         students.append(
             {
                 "answer_id": answer_id,
@@ -235,9 +248,72 @@ def parse_mark_list(html: str) -> tuple[list[dict[str, str]], int]:
                 "student_no": cells[2] if len(cells) > 2 else "",
                 "submitted_at": cells[3] if len(cells) > 3 else "",
                 "state": cells[5] if len(cells) > 5 else "",
+                "istudy_score": score_value.group(1) if score_value else "",
             }
         )
     return students, int(total_page.group(1)) if total_page else 1
+
+
+_REVIEW_FORM = re.compile(r'<form[^>]*id="form1"[^>]*>(.*?)</form>', re.S | re.I)
+_INPUT_TAG = re.compile(r"<input\b[^>]*>", re.I)
+_INPUT_NAME = re.compile(r"""\bname\s*=\s*["']([^"']*)["']""", re.I)
+_INPUT_VALUE = re.compile(r"""\bvalue\s*=\s*["']([^"']*)["']""", re.I)
+_TEXTAREA = re.compile(
+    r"""<textarea\b[^>]*\bname\s*=\s*["']([^"']*)["'][^>]*>(.*?)</textarea>""",
+    re.S | re.I,
+)
+
+
+def parse_review_form(html: str) -> dict[str, list[str]]:
+    """解析批阅页 ``form1`` 里的隐藏字段（保持页面顺序，同名保留多值）。
+
+    i学习 的保存接口就是把这个表单序列化后 POST 出去，所以这里不需要逆向签名：
+    ``enc`` / ``uploadEnc`` / ``uploadTimeStamp`` 等都由服务端渲染在表单里。
+    """
+    form = _REVIEW_FORM.search(html)
+    if form is None:
+        raise IstudyError("批阅页没有返回作答表单，登录态可能已失效或没有批阅权限")
+
+    fields: dict[str, list[str]] = {}
+    for tag in _INPUT_TAG.findall(form.group(1)):
+        name = _INPUT_NAME.search(tag)
+        if name is None:
+            continue
+        value = _INPUT_VALUE.search(tag)
+        fields.setdefault(_unescape(name.group(1)), []).append(
+            _unescape(value.group(1)) if value else ""
+        )
+    for name, value in _TEXTAREA.findall(form.group(1)):
+        fields.setdefault(_unescape(name), []).append(_unescape(value).strip())
+    return fields
+
+
+def distribute_total(total: float, full_scores: list[float]) -> list[float]:
+    """把总分按各题满分比例拆成单题分，尾差补到最后一题，保证求和等于总分。"""
+    if not full_scores:
+        return []
+    total = max(0.0, total)
+    if len(full_scores) == 1:
+        return [round(total, 1)]
+
+    weights = [item if item > 0 else 0.0 for item in full_scores]
+    if sum(weights) <= 0:
+        weights = [1.0] * len(full_scores)
+    weight_sum = sum(weights)
+    shares = [round(total * weight / weight_sum, 1) for weight in weights]
+    shares[-1] = round(total - sum(shares[:-1]), 1)
+    if shares[-1] < 0:
+        shares[-1] = 0.0
+    return shares
+
+
+def review_qids(fields: dict[str, list[str]]) -> list[str]:
+    """单题字段名形如 ``qscore87715064``，返回其中的记录 id。"""
+    return [
+        name[6:]
+        for name in fields
+        if name.startswith("qscore") and name[6:].isdigit()
+    ]
 
 
 async def _cdp_version(port: int) -> dict[str, Any]:
@@ -789,3 +865,73 @@ class IstudyClient:
             head = resp.content[:180].decode("utf-8", errors="replace")
             raise IstudyError(f"i学习 导出实验报告作答失败（{resp.status_code}）：{head}")
         return resp.content
+
+    async def fetch_review_form(
+        self,
+        *,
+        cid: str,
+        cpi: str,
+        clazzid: str,
+        work_id: str,
+        answer_id: str,
+    ) -> tuple[dict[str, list[str]], str]:
+        """打开某个学生的批阅页，返回 ``form1`` 字段和页面地址（用作 Referer）。"""
+        url = (
+            f"{WORK_REVIEW}?courseid={cid}&clazzid={clazzid}&workId={work_id}"
+            f"&workAnswerId={answer_id}&groupId=0&from=&sort=0&order=0&status=0"
+            f"&pages=1&size=20&topicid=0&backurl="
+        )
+        resp = await self.client.get(
+            url,
+            headers={"Referer": f"{WORK_MARK}?courseid={cid}&clazzid={clazzid}&cpi={cpi}&id={work_id}"},
+        )
+        if resp.status_code >= 400 or "没有此页面访问权限" in resp.text:
+            raise IstudyError(
+                f"打不开学生批阅页（answerId={answer_id}），登录态可能已失效"
+            )
+        return parse_review_form(resp.text), url
+
+    async def save_review(
+        self,
+        fields: dict[str, list[str]],
+        *,
+        score: float,
+        referer: str,
+        comment: str | None = None,
+        per_scores: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """把总分 / 评语写回 i学习，返回接口原始 JSON（``status=true`` 即成功）。"""
+        values = {name: list(items) for name, items in fields.items()}
+        values["score"] = [f"{score:g}"]
+        values["back"] = ["1"]
+
+        qids = review_qids(fields)
+        if qids:
+            values["answerwqbid"] = [",".join(qids) + ","]
+        for qid in qids:
+            if per_scores and qid in per_scores:
+                values[f"score{qid}"] = [f"{per_scores[qid]:g}"]
+        if comment is not None:
+            values["comment"] = [comment]
+
+        body = [(name, item) for name, items in values.items() for item in items]
+        mark_type = (values.get("markType") or ["0"])[0] or "0"
+        resp = await self.client.post(
+            f"{WORK_SAVE_REVIEW}?score={score:g}&markType={mark_type}",
+            content=urlencode(body),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": referer,
+            },
+        )
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise IstudyError(
+                f"i学习 保存分数返回的不是 JSON（{resp.status_code}）：{resp.text[:160]}"
+            ) from exc
+        if not payload.get("status"):
+            raise IstudyError(f"i学习 拒绝保存分数：{payload.get('msg') or payload}")
+        return payload

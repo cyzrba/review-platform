@@ -5,10 +5,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   PAGE_SIZE,
+  applyIstudyBackfill,
   classSummary,
   compareIstudyLabStudents,
   compareIstudyStudents,
   deleteResult,
+  deleteIstudySubmissionFiles,
+  deleteIstudyWorkFiles,
   exportCsvUrl,
   exportIstudyLabReport,
   exportXlsxUrl,
@@ -27,6 +30,7 @@ import {
   listIstudyWorks,
   listResults,
   listRubrics,
+  previewIstudyBackfill,
   runGrading,
   runSingleGrading,
   syncIstudyLabReports,
@@ -802,16 +806,18 @@ async function runExport() {
   await loadScrapeList()
 }
 
-async function openSubmissions(workId, className, source = 'work') {
-  submissionsDialog.value = true
+const submissionsWorkId = ref(null)
+const submissionsClassName = ref('')
+const submissionsSource = ref('work')
+
+async function loadSubmissions() {
+  if (!submissionsWorkId.value) return
   submissionsLoading.value = true
-  submissions.value = []
-  submissionsTitle.value = `${workContext.value?.name || ''} · ${className}`
   try {
     submissions.value =
-      source === 'lab'
-        ? await listIstudyLabSubmissions(workId)
-        : await listIstudySubmissions(workId)
+      submissionsSource.value === 'lab'
+        ? await listIstudyLabSubmissions(submissionsWorkId.value)
+        : await listIstudySubmissions(submissionsWorkId.value)
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -819,8 +825,177 @@ async function openSubmissions(workId, className, source = 'work') {
   }
 }
 
+async function openSubmissions(workId, className, source = 'work') {
+  submissionsWorkId.value = workId
+  submissionsClassName.value = className
+  submissionsSource.value = source
+  submissionsDialog.value = true
+  submissions.value = []
+  submissionsTitle.value = `${workContext.value?.name || ''} · ${className}`
+  await loadSubmissions()
+}
+
+// ---------- 删除本地附件（不影响 i学习 上的提交） ----------
+const deleteDialog = ref(false)
+const deleteTarget = ref(null)
+const deleteWholeWork = ref(false)
+const deleteAlsoResult = ref(false)
+const deletingFiles = ref(false)
+
+function askDeleteSubmission(row) {
+  deleteTarget.value = row
+  deleteWholeWork.value = false
+  deleteAlsoResult.value = false
+  deleteDialog.value = true
+}
+
+function askDeleteAll() {
+  deleteTarget.value = null
+  deleteWholeWork.value = true
+  deleteAlsoResult.value = false
+  deleteDialog.value = true
+}
+
+async function confirmDeleteFiles() {
+  if (!submissionsWorkId.value) return
+  deletingFiles.value = true
+  try {
+    const result = deleteWholeWork.value
+      ? await deleteIstudyWorkFiles(submissionsWorkId.value, deleteAlsoResult.value)
+      : await deleteIstudySubmissionFiles(deleteTarget.value.id, deleteAlsoResult.value)
+    const mb = (Number(result.freed_bytes || 0) / 1024 / 1024).toFixed(1)
+    ElMessage.success(`已删除 ${result.files} 个文件，释放 ${mb} MB 磁盘空间`)
+    deleteDialog.value = false
+    await loadSubmissions()
+    await loadScrapeList()
+    if (result.results_deleted) await refreshResults()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    deletingFiles.value = false
+  }
+}
+
 function imagePreviewList(row) {
   return (row.image_keys || []).map((key) => fileDownloadUrl(key))
+}
+
+// ---------- 把本地分数 / 评语回填到 i学习 ----------
+const backfillDialog = ref(false)
+const backfillWork = ref(null)
+const backfillLoading = ref(false)
+const backfillApplying = ref(false)
+const backfillRows = ref([])
+const backfillSummary = ref({ total: 0, write: 0, skip: 0 })
+const backfillOverwrite = ref(false)
+const backfillWriteComment = ref(true)
+const backfillProgress = ref({ done: 0, total: 0 })
+const backfillReceipts = ref([])
+
+const backfillWorkId = computed(
+  () => backfillWork.value?.classes?.[0]?.work_id || null,
+)
+const backfillWritable = computed(() =>
+  backfillRows.value.filter((row) => row.action === 'write' && row.student_id),
+)
+const backfillPercent = computed(() => {
+  const total = backfillProgress.value.total
+  return total ? Math.round((backfillProgress.value.done / total) * 100) : 0
+})
+
+function backfillActionMeta(action) {
+  if (action === 'write') return { label: '写入', type: 'success' }
+  if (action === 'done') return { label: '已写入', type: 'success' }
+  if (action === 'failed') return { label: '失败', type: 'danger' }
+  return { label: '跳过', type: 'info' }
+}
+
+async function openBackfill(row) {
+  backfillWork.value = row
+  backfillDialog.value = true
+  backfillOverwrite.value = false
+  backfillWriteComment.value = true
+  backfillReceipts.value = []
+  backfillProgress.value = { done: 0, total: 0 }
+  await loadBackfillPreview()
+}
+
+async function loadBackfillPreview() {
+  if (!backfillWorkId.value) return
+  backfillLoading.value = true
+  try {
+    const classes = backfillWork.value?.classes || []
+    const plan = await previewIstudyBackfill(backfillWorkId.value, {
+      overwrite: backfillOverwrite.value,
+      // 卡片按班级筛选时，这行只剩一个班；没筛选时一次覆盖这次作业的所有班
+      class_id: classes.length === 1 ? classes[0].class_id ?? undefined : undefined,
+    })
+    backfillRows.value = plan.rows || []
+    backfillSummary.value = plan.summary || { total: 0, write: 0, skip: 0 }
+  } catch (error) {
+    backfillRows.value = []
+    backfillSummary.value = { total: 0, write: 0, skip: 0 }
+    ElMessage.error(error.message)
+  } finally {
+    backfillLoading.value = false
+  }
+}
+
+async function runBackfill() {
+  const targets = backfillWritable.value
+  if (!targets.length || !backfillWorkId.value) return
+  const scope = backfillWriteComment.value ? '分数和评语' : '分数'
+  const extra = backfillOverwrite.value ? '（已批阅的会被覆盖）' : ''
+  try {
+    await ElMessageBox.confirm(
+      `将把 ${targets.length} 名学生的${scope}写入 i学习${extra}，确定继续？`,
+      '确认回填',
+      { type: 'warning', confirmButtonText: '开始写入' },
+    )
+  } catch {
+    return
+  }
+
+  backfillApplying.value = true
+  backfillReceipts.value = []
+  backfillProgress.value = { done: 0, total: targets.length }
+  const chunkSize = 5
+  try {
+    for (let index = 0; index < targets.length; index += chunkSize) {
+      const chunk = targets.slice(index, index + chunkSize)
+      const result = await applyIstudyBackfill(backfillWorkId.value, {
+        student_ids: chunk.map((row) => row.student_id),
+        overwrite: backfillOverwrite.value,
+        write_comment: backfillWriteComment.value,
+      })
+      const receipts = result.receipts || []
+      backfillReceipts.value.push(...receipts)
+      for (const receipt of receipts) {
+        const row = backfillRows.value.find((item) => item.student_id === receipt.student_id)
+        if (!row) continue
+        row.action = receipt.ok ? 'done' : 'failed'
+        row.backfill_status = receipt.ok ? 'success' : 'failed'
+        row.reason = receipt.message
+      }
+      backfillProgress.value = {
+        done: Math.min(index + chunk.length, targets.length),
+        total: targets.length,
+      }
+    }
+    const okCount = backfillReceipts.value.filter((item) => item.ok).length
+    const failedCount = backfillReceipts.value.length - okCount
+    if (failedCount) {
+      ElMessage.warning(`回填完成：成功 ${okCount} 人，失败 ${failedCount} 人`)
+    } else {
+      ElMessage.success(`回填完成：成功写入 ${okCount} 人`)
+    }
+    await loadScrapeList()
+    await refreshResults()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    backfillApplying.value = false
+  }
 }
 
 function exportFile(format) {
@@ -1027,7 +1202,7 @@ onMounted(async () => {
             {{ Math.max(0, (row.result_count || 0) - (row.graded_count || 0)) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openWorkDialog(row)">抓取附件</el-button>
             <el-button
@@ -1038,6 +1213,15 @@ onMounted(async () => {
               "
             >
               明细
+            </el-button>
+            <el-button
+              link
+              type="primary"
+              :disabled="isLab || !row.graded_count"
+              :title="isLab ? '实验报告回填还没接' : '把本地分数和评语写回 i学习'"
+              @click="openBackfill(row)"
+            >
+              回填分数
             </el-button>
           </template>
         </el-table-column>
@@ -1292,6 +1476,84 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="backfillDialog" title="一键回填到 i学习" width="900px">
+      <div v-loading="backfillLoading">
+        <el-alert
+          type="warning"
+          :closable="false"
+          style="margin-bottom: 12px"
+          title="会把本地评审结果写入 i学习 作业批阅，学生端立即可见。请先核对分数与评语。"
+        />
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px">
+          <span style="font-weight: 600">{{ backfillWork?.name }}</span>
+          <el-checkbox v-model="backfillOverwrite" @change="loadBackfillPreview">
+            覆盖 i学习 已批阅的
+          </el-checkbox>
+          <el-checkbox v-model="backfillWriteComment">同时写入 AI 评语</el-checkbox>
+          <el-button link @click="loadBackfillPreview">刷新</el-button>
+          <span class="muted" style="margin-left: auto">
+            共 {{ backfillSummary.total }} 人 · 将写入 {{ backfillSummary.write }} 人 · 跳过
+            {{ backfillSummary.skip }} 人
+          </span>
+        </div>
+
+        <el-table :data="backfillRows" size="small" max-height="430" empty-text="没有可回填的学生">
+          <el-table-column prop="class_name" label="班级" width="110" />
+          <el-table-column prop="student_no" label="学号" width="125" />
+          <el-table-column prop="student_name" label="姓名" width="90" />
+          <el-table-column label="本地分数" width="90">
+            <template #default="{ row }">{{ row.local_score ?? '—' }}</template>
+          </el-table-column>
+          <el-table-column label="i学习分数" width="100">
+            <template #default="{ row }">
+              <span
+                :style="
+                  row.istudy_score != null &&
+                  row.local_score != null &&
+                  row.istudy_score !== row.local_score
+                    ? 'color:#e8590c;font-weight:600'
+                    : ''
+                "
+              >
+                {{ row.istudy_score ?? '—' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="评语" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.local_comment || '—' }}</template>
+          </el-table-column>
+          <el-table-column prop="istudy_state" label="i学习状态" width="140" />
+          <el-table-column label="动作" width="90">
+            <template #default="{ row }">
+              <el-tag size="small" :type="backfillActionMeta(row.action).type">
+                {{ backfillActionMeta(row.action).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reason" label="说明" min-width="190" show-overflow-tooltip />
+        </el-table>
+
+        <el-progress
+          v-if="backfillApplying || backfillProgress.total"
+          :percentage="backfillPercent"
+          :status="backfillApplying ? undefined : 'success'"
+          style="margin-top: 14px"
+        />
+      </div>
+
+      <template #footer>
+        <el-button @click="backfillDialog = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="backfillApplying"
+          :disabled="!backfillWritable.length"
+          @click="runBackfill"
+        >
+          开始写入（{{ backfillWritable.length }} 人）
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="studentDialog"
       :title="`按人抓取 · ${studentContext?.class_name || ''}`"
@@ -1526,14 +1788,27 @@ onMounted(async () => {
     <el-drawer
       v-model="submissionsDialog"
       :title="`提交明细 · ${submissionsTitle}`"
-      size="760px"
+      size="820px"
     >
       <div v-loading="submissionsLoading">
         <el-empty
           v-if="!submissionsLoading && !submissions.length"
           description="还没有抓过这次作业的附件"
         />
-        <el-table v-else :data="submissions" size="small" max-height="660">
+        <div
+          v-if="submissions.length"
+          style="display: flex; justify-content: flex-end; margin-bottom: 8px"
+        >
+          <el-button
+            v-if="submissionsSource !== 'lab'"
+            link
+            type="danger"
+            @click="askDeleteAll"
+          >
+            清空本班附件
+          </el-button>
+        </div>
+        <el-table v-if="submissions.length" :data="submissions" size="small" max-height="660">
           <el-table-column prop="student_name" label="姓名" width="90" />
           <el-table-column prop="student_no" label="学号" width="120" />
           <el-table-column label="状态" width="80">
@@ -1562,8 +1837,50 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column prop="source_filename" label="文件" min-width="200" show-overflow-tooltip />
           <el-table-column prop="error_message" label="备注" min-width="150" show-overflow-tooltip />
+          <el-table-column label="操作" width="96" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                link
+                type="danger"
+                :disabled="
+                  submissionsSource === 'lab' || (!row.size_bytes && !row.image_count)
+                "
+                @click="askDeleteSubmission(row)"
+              >
+                删除附件
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </div>
     </el-drawer>
+
+    <el-dialog v-model="deleteDialog" title="删除本地附件" width="540px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        title="只删除本机磁盘上的文件，i学习 上学生的提交不会受影响。"
+      />
+      <div style="margin-top: 14px; font-weight: 600">
+        {{
+          deleteWholeWork
+            ? '将清空本班这次作业的全部本地附件'
+            : `学生：${deleteTarget?.student_name || ''}（${deleteTarget?.student_no || ''}）`
+        }}
+      </div>
+      <el-checkbox v-model="deleteAlsoResult" style="margin-top: 14px">
+        同时删除对应的评分结果（分数和评语会一起删除）
+      </el-checkbox>
+      <div class="muted" style="margin-top: 8px; line-height: 1.6">
+        不勾选时评分结果会保留；但复核图片、重新评审需要重新下载附件。
+        重新下载后分数不会自动恢复，需要重新评审或手工调整。
+      </div>
+      <template #footer>
+        <el-button @click="deleteDialog = false">取消</el-button>
+        <el-button type="danger" :loading="deletingFiles" @click="confirmDeleteFiles">
+          确认删除
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

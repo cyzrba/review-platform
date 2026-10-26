@@ -817,6 +817,92 @@ def switch_assignment_rubric(db: Session, work: IstudyWork, rubric: Rubric) -> d
     db.flush()
     return {"moved": moved, "skipped": skipped, "rubric_id": rubric.id}
 
+def delete_submission_files(
+    db: Session,
+    submission: IstudySubmission,
+    *,
+    also_result: bool = False,
+) -> dict[str, int]:
+    """删除某个学生这次作业的**本地附件**，不影响 i学习 上的提交。
+
+    默认保留评分结果（分数 / 评语都还在），只是复核图片、重新评审需要重新下载附件；
+    ``also_result=True`` 时把对应的评分结果一起删掉。
+    """
+    from ..storage import get_storage
+
+    storage = get_storage()
+    file_keys = {item.object_key for item in submission.files if item.object_key}
+    keys = set(file_keys)
+    if submission.object_key:
+        keys.add(submission.object_key)
+
+    freed = sum(item.size_bytes or 0 for item in submission.files)
+    if submission.object_key and submission.object_key not in file_keys:
+        freed += submission.size_bytes or 0
+
+    for key in keys:
+        try:
+            storage.delete(key)
+        except Exception:  # noqa: BLE001  删文件失败不应该卡住数据库清理
+            logger.exception("删除对象失败：%s", key)
+
+    for item in list(submission.files):
+        db.delete(item)
+    submission.object_key = None
+    submission.source_filename = None
+    submission.size_bytes = 0
+    submission.image_count = 0
+    submission.content_checksum = None
+    submission.file_state = FileState.none
+    submission.error_message = None
+
+    results_deleted = 0
+    rubric_id = submission.work.rubric_id if submission.work else None
+    if also_result and rubric_id:
+        row = (
+            db.execute(
+                select(GradingResult).where(
+                    GradingResult.rubric_id == rubric_id,
+                    GradingResult.student_id == submission.student_id,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is not None:
+            db.delete(row)
+            results_deleted = 1
+
+    db.commit()
+    return {
+        "submissions": 1,
+        "files": len(keys),
+        "freed_bytes": freed,
+        "results_deleted": results_deleted,
+    }
+
+
+def delete_work_files(
+    db: Session, work: IstudyWork, *, also_result: bool = False
+) -> dict[str, int]:
+    """清空某个班这次作业下所有学生的本地附件。"""
+    rows = (
+        db.execute(
+            select(IstudySubmission).where(IstudySubmission.work_id == work.id)
+        )
+        .scalars()
+        .all()
+    )
+    total = {"submissions": 0, "files": 0, "freed_bytes": 0, "results_deleted": 0}
+    for row in rows:
+        if not row.object_key and not row.files:
+            continue
+        result = delete_submission_files(db, row, also_result=also_result)
+        for key, value in result.items():
+            total[key] += value
+    return total
+
+
 def enqueue_export(
     db: Session,
     work: IstudyWork,
