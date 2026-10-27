@@ -394,6 +394,8 @@ def list_lab_report_groups(
                         else_=0,
                     )
                 ),
+                func.count(IstudyLabSubmission.istudy_score),
+                func.avg(IstudyLabSubmission.istudy_score),
             )
             .where(IstudyLabSubmission.report_id.in_(report_ids))
             .group_by(IstudyLabSubmission.report_id)
@@ -417,7 +419,9 @@ def list_lab_report_groups(
 
     groups: dict[str, dict[str, Any]] = {}
     for report in reports:
-        captured, missing, images = submission_stats.get(report.id, (0, 0, 0))
+        captured, missing, images, scores, score_average = submission_stats.get(
+            report.id, (0, 0, 0, 0, None)
+        )
         results, graded = result_stats.get((report.rubric_id or -1, report.class_id), (0, 0))
         row_status = report_status(report, now=now)
         class_row = {
@@ -438,6 +442,10 @@ def list_lab_report_groups(
             "captured_count": int(captured or 0),
             "missing_count": int(missing or 0),
             "image_count": int(images or 0),
+            "score_count": int(scores or 0),
+            "average_istudy_score": (
+                round(float(score_average), 1) if score_average is not None else None
+            ),
             "result_count": results,
             "graded_count": int(graded or 0),
             "last_export": None,
@@ -463,6 +471,8 @@ def list_lab_report_groups(
                 "captured_count": 0,
                 "missing_count": 0,
                 "image_count": 0,
+                "score_count": 0,
+                "average_istudy_score": None,
                 "result_count": 0,
                 "graded_count": 0,
                 "classes": [],
@@ -484,6 +494,23 @@ def list_lab_report_groups(
         group["captured_count"] += class_row["captured_count"]
         group["missing_count"] += class_row["missing_count"]
         group["image_count"] += class_row["image_count"]
+        previous_score_count = group["score_count"]
+        previous_score_total = (
+            (group["average_istudy_score"] or 0) * previous_score_count
+        )
+        class_score_total = (
+            (class_row["average_istudy_score"] or 0) * class_row["score_count"]
+        )
+        group["score_count"] += class_row["score_count"]
+        group["average_istudy_score"] = (
+            round(
+                (previous_score_total + class_score_total)
+                / group["score_count"],
+                1,
+            )
+            if group["score_count"]
+            else None
+        )
         group["result_count"] += results
         group["graded_count"] += int(graded or 0)
         group["classes"].append(class_row)
@@ -604,6 +631,7 @@ def _sync_report_students(db: Session, row: IstudyLabReport, item: ScrapedLabRep
             submission.state = SubmissionState.missing
             submission.istudy_fill_id = None
             submission.submitted_at = None
+            submission.istudy_score = None
             continue
         submission.state = entry.state
         submission.istudy_fill_id = entry.fill_id
@@ -1187,6 +1215,11 @@ async def compare_report_students(db: Session, report: IstudyLabReport) -> dict[
                 "fetched": fetched,
                 "in_roster": student is not None,
                 "image_count": submission.image_count if submission else 0,
+                "istudy_score": (
+                    float(item["score"])
+                    if isinstance(item.get("score"), (int, float))
+                    else submission.istudy_score if submission else None
+                ),
             }
         )
 
@@ -1205,6 +1238,7 @@ async def compare_report_students(db: Session, report: IstudyLabReport) -> dict[
                 "fetched": bool(submission and submission.file_state == FileState.ready),
                 "in_roster": True,
                 "image_count": submission.image_count if submission else 0,
+                "istudy_score": submission.istudy_score if submission else None,
             }
         )
 

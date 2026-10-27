@@ -395,6 +395,8 @@ class IstudyWorkClassOut(BaseModel):
     captured_count: int = Field(0, description="本地已经抓到文件的人数")
     missing_count: int = Field(0, description="本地判定为未交的人数")
     image_count: int = Field(0, description="抓到的作答图片数")
+    score_count: int = Field(0, description="i学习 上已有分数的人数")
+    average_istudy_score: float | None = Field(None, description="i学习 已有分数的平均分")
     result_count: int = Field(0, description="这个班已有的评分结果")
     graded_count: int = Field(0, description="这个班已评审条数")
     last_export: IstudyExportOut | None = None
@@ -422,6 +424,8 @@ class IstudyWorkGroupOut(BaseModel):
     captured_count: int = 0
     missing_count: int = 0
     image_count: int = 0
+    score_count: int = Field(0, description="i学习 上已有分数的人数")
+    average_istudy_score: float | None = None
     result_count: int = 0
     graded_count: int = 0
     classes: list[IstudyWorkClassOut] = Field(default_factory=list)
@@ -442,6 +446,22 @@ class IstudyWorkSyncResult(BaseModel):
     updated: int = 0
     class_count: int = 0
     notes: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
+class IstudyScoreSyncRequest(BaseModel):
+    course_id: int = Field(..., description="要同步成绩的本地课程 id")
+
+
+class IstudyScoreSyncResult(BaseModel):
+    course_id: int
+    course_name: str
+    work_count: int = 0
+    student_rows: int = 0
+    submitted_rows: int = 0
+    scored_rows: int = 0
+    unmatched_rows: int = 0
+    failures: list[str] = Field(default_factory=list)
     message: str = ""
 
 
@@ -467,6 +487,7 @@ class IstudyStudentCompareOut(BaseModel):
     fetched: bool = False
     in_roster: bool = True
     image_count: int = 0
+    istudy_score: float | None = None
 
 
 class IstudyWorkCompareOut(BaseModel):
@@ -503,6 +524,7 @@ class IstudySubmissionOut(BaseModel):
     object_key: str | None = None
     size_bytes: int = 0
     image_count: int = 0
+    istudy_score: float | None = None
     error_message: str | None = None
     image_keys: list[str] = Field(default_factory=list, description="作答图片的 object key，按顺序")
 

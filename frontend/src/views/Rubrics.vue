@@ -137,9 +137,6 @@ onMounted(async () => {
     <div class="page-header">
       <div>
         <h2 class="page-title">评分细则</h2>
-        <div class="page-subtitle">
-          一个项目 / 一次作业对应一份评分细则，可以挂到一个或多个课程下；AI 只按它给一个总分和一段评语
-        </div>
       </div>
       <el-button type="primary" @click="openCreate">新建评分细则</el-button>
     </div>

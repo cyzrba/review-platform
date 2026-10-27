@@ -1033,9 +1033,6 @@ onMounted(async () => {
     <div class="page-header">
       <div>
         <h2 class="page-title">评审与成绩</h2>
-        <div class="page-subtitle">
-          选课程 → 选作业 → 抓取附件 → 一键 AI 评审 → 导出成绩与评语
-        </div>
       </div>
       <div style="display: flex; gap: 8px">
         <el-button :disabled="!rubricId" @click="exportFile('csv')">导出 CSV</el-button>
@@ -1085,11 +1082,11 @@ onMounted(async () => {
       </div>
       <div class="stat-card">
         <div class="label">已评审</div>
-        <div class="value" style="color: #2f9e44">{{ rubric.stats.graded_count }}</div>
+        <div class="value metric-positive">{{ rubric.stats.graded_count }}</div>
       </div>
       <div class="stat-card">
         <div class="label">待评审</div>
-        <div class="value" style="color: #e8590c">{{ rubric.stats.pending_count }}</div>
+        <div class="value metric-pending">{{ rubric.stats.pending_count }}</div>
       </div>
       <div class="stat-card">
         <div class="label">涉及班级</div>
@@ -1266,27 +1263,27 @@ onMounted(async () => {
         </div>
 
         <el-table :data="results.items" empty-text="还没有评分结果">
-          <el-table-column prop="class_name" label="班级" width="120" />
-          <el-table-column prop="student_no" label="学号" width="140" />
-          <el-table-column prop="student_name" label="姓名" width="90" />
+          <el-table-column prop="class_name" label="班级" width="100" />
+          <el-table-column prop="student_no" label="学号" width="120" />
+          <el-table-column prop="student_name" label="姓名" width="80" />
           <el-table-column
             prop="source_filename"
             label="提交文件"
-            min-width="200"
+            min-width="150"
             show-overflow-tooltip
           />
-          <el-table-column label="状态" width="100">
+          <el-table-column label="状态" width="90">
             <template #default="{ row }">
               <el-tag size="small" :type="statusMeta[row.status]?.type">
                 {{ statusMeta[row.status]?.label || row.status }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="总分" width="80">
+          <el-table-column label="总分" width="70">
             <template #default="{ row }">{{ row.score ?? '—' }}</template>
           </el-table-column>
-          <el-table-column prop="comment" label="评语" min-width="220" show-overflow-tooltip />
-          <el-table-column label="操作" width="240" fixed="right">
+          <el-table-column prop="comment" label="评语" min-width="180" show-overflow-tooltip />
+          <el-table-column label="操作" width="210" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openResult(row)">复核</el-button>
               <el-button link @click="runOne(row)">重新评审</el-button>

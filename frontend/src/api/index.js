@@ -67,7 +67,11 @@ export const clearCourseRoster = (courseId) =>
 
 // ---------- i学习（作业） ----------
 export const syncIstudyWorks = (payload) =>
-  http.post('/istudy/works/sync', payload).then((r) => r.data)
+  http.post('/istudy/works/sync', payload, { timeout: 900000 }).then((r) => r.data)
+export const syncIstudyWorkScores = (courseId) =>
+  http
+    .post('/istudy/works/sync-scores', { course_id: courseId }, { timeout: 900000 })
+    .then((r) => r.data)
 export const listIstudyWorks = (params = {}) =>
   http.get('/istudy/works', { params }).then((r) => r.data)
 export const exportIstudyWork = (workId, payload = {}) =>
@@ -97,7 +101,7 @@ export const compareIstudyStudents = (workId) =>
 
 // ---------- i学习（实验报告） ----------
 export const syncIstudyLabReports = (payload) =>
-  http.post('/istudy/lab-reports/sync', payload).then((r) => r.data)
+  http.post('/istudy/lab-reports/sync', payload, { timeout: 900000 }).then((r) => r.data)
 export const listIstudyLabReports = (params = {}) =>
   http.get('/istudy/lab-reports', { params }).then((r) => r.data)
 export const exportIstudyLabReport = (reportId, payload = {}) =>

@@ -6,6 +6,7 @@ const routes = [
   { path: '/rubrics', name: 'rubrics', component: () => import('@/views/Rubrics.vue') },
   { path: '/grading', name: 'grading', component: () => import('@/views/Grading.vue') },
   { path: '/grading/:rubricId', name: 'grading-detail', component: () => import('@/views/Grading.vue') },
+  { path: '/data-sync', name: 'data-sync', component: () => import('@/views/DataSync.vue') },
 ]
 
 export default createRouter({

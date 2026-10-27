@@ -44,6 +44,8 @@ from ..schemas import (
     IstudyLabSyncResult,
     IstudyRosterImportRequest,
     IstudyRosterImportResult,
+    IstudyScoreSyncRequest,
+    IstudyScoreSyncResult,
     IstudyStatus,
     IstudyStudentCompareOut,
     IstudySubmissionOut,
@@ -53,7 +55,7 @@ from ..schemas import (
     IstudyWorkSyncRequest,
     IstudyWorkSyncResult,
 )
-from ..services import backfill, homework_sync, lab_sync
+from ..services import backfill, homework_sync, lab_sync, score_sync
 from ..services.grading import enqueue_grading
 from ..services.istudy import IstudyClient, IstudyError
 from ..services.roster_sync import import_rows
@@ -275,6 +277,43 @@ def istudy_list_works(
 
 
 @router.post(
+    "/istudy/works/sync-scores",
+    response_model=IstudyScoreSyncResult,
+    summary="同步所有作业班级的学生已有分数到本地",
+)
+async def istudy_sync_work_scores(
+    payload: IstudyScoreSyncRequest, db: Session = Depends(get_db)
+) -> IstudyScoreSyncResult:
+    course = db.get(Course, payload.course_id)
+    if course is None:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    try:
+        cid, cpi, _source_name = await _resolve_course_target(db, course, None, None)
+        summary = await score_sync.sync_work_scores(db, course, cid=cid, cpi=cpi)
+    except IstudyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"成绩入库失败：{exc}") from exc
+
+    message = (
+        f"课程「{course.name}」：同步 {summary['work_count']} 个作业班级，"
+        f"写入 {summary['student_rows']} 条学生记录，"
+        f"其中 {summary['scored_rows']} 人有 i学习 分数"
+    )
+    if summary["failures"]:
+        message += f"；{len(summary['failures'])} 个班级读取失败"
+    return IstudyScoreSyncResult(
+        course_id=course.id,
+        course_name=course.name,
+        **summary,
+        message=message,
+    )
+
+
+@router.post(
     "/istudy/works/{work_id}/export",
     response_model=IstudyExportOut,
     summary="抓这次作业的附件（导出 → 下载 → 抽作答图片 → 匹配学生）",
@@ -374,6 +413,7 @@ def istudy_work_submissions(
                 object_key=row.object_key,
                 size_bytes=row.size_bytes,
                 image_count=row.image_count,
+                istudy_score=row.istudy_score,
                 error_message=row.error_message,
                 image_keys=[item.object_key for item in row.files],
             )
@@ -703,6 +743,7 @@ def istudy_lab_report_submissions(
                 object_key=row.object_key,
                 size_bytes=row.size_bytes,
                 image_count=row.image_count,
+                istudy_score=row.istudy_score,
                 error_message=row.error_message,
                 image_keys=[item.object_key for item in row.files],
             )

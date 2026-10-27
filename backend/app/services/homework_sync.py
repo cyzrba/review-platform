@@ -449,6 +449,8 @@ def list_work_groups(
                         else_=0,
                     )
                 ),
+                func.count(IstudySubmission.istudy_score),
+                func.avg(IstudySubmission.istudy_score),
             )
             .where(IstudySubmission.work_id.in_(work_ids))
             .group_by(IstudySubmission.work_id)
@@ -492,7 +494,9 @@ def list_work_groups(
 
     groups: dict[str, dict[str, Any]] = {}
     for work in works:
-        captured, missing, images = submission_stats.get(work.id, (0, 0, 0))
+        captured, missing, images, scores, score_average = submission_stats.get(
+            work.id, (0, 0, 0, 0, None)
+        )
         if work.class_id is None:
             # 本地还没建这个班：退回到按细则统计
             results, graded = result_by_rubric.get(work.rubric_id or -1, (0, 0))
@@ -514,6 +518,10 @@ def list_work_groups(
             "captured_count": int(captured or 0),
             "missing_count": int(missing or 0),
             "image_count": int(images or 0),
+            "score_count": int(scores or 0),
+            "average_istudy_score": (
+                round(float(score_average), 1) if score_average is not None else None
+            ),
             "result_count": results,
             "graded_count": int(graded or 0),
             "last_export": latest_export.get(work.id),
@@ -537,6 +545,8 @@ def list_work_groups(
                 "captured_count": 0,
                 "missing_count": 0,
                 "image_count": 0,
+                "score_count": 0,
+                "average_istudy_score": None,
                 "result_count": 0,
                 "graded_count": 0,
                 "classes": [],
@@ -559,6 +569,23 @@ def list_work_groups(
         group["captured_count"] += class_row["captured_count"]
         group["missing_count"] += class_row["missing_count"]
         group["image_count"] += class_row["image_count"]
+        previous_score_count = group["score_count"]
+        previous_score_total = (
+            (group["average_istudy_score"] or 0) * previous_score_count
+        )
+        class_score_total = (
+            (class_row["average_istudy_score"] or 0) * class_row["score_count"]
+        )
+        group["score_count"] += class_row["score_count"]
+        group["average_istudy_score"] = (
+            round(
+                (previous_score_total + class_score_total)
+                / group["score_count"],
+                1,
+            )
+            if group["score_count"]
+            else None
+        )
         group["result_count"] += results
         group["graded_count"] += int(graded or 0)
         group["classes"].append(class_row)
@@ -694,6 +721,18 @@ async def compare_work_students(db: Session, work: IstudyWork) -> dict[str, Any]
         }
     by_student_no = {item.student_no: item for item in students.values()}
 
+    def score_of(item: dict[str, str]) -> float | None:
+        raw = str(item.get("istudy_score") or "").strip()
+        if not raw:
+            return None
+        try:
+            score = float(raw)
+        except ValueError:
+            return None
+        if score == 0 and "待批" in str(item.get("state") or ""):
+            return None
+        return score
+
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in istudy_rows:
@@ -721,6 +760,7 @@ async def compare_work_students(db: Session, work: IstudyWork) -> dict[str, Any]
                 "fetched": fetched,
                 "in_roster": student is not None,
                 "image_count": submission.image_count if submission else 0,
+                "istudy_score": score_of(item),
             }
         )
 
@@ -740,6 +780,7 @@ async def compare_work_students(db: Session, work: IstudyWork) -> dict[str, Any]
                 "fetched": bool(submission and submission.file_state == FileState.ready),
                 "in_roster": True,
                 "image_count": submission.image_count if submission else 0,
+                "istudy_score": submission.istudy_score if submission else None,
             }
         )
 
