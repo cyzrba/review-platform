@@ -1,11 +1,15 @@
 <script setup>
-import { Download, Refresh, View } from '@element-plus/icons-vue'
+import { Delete, Download, Refresh, View } from '@element-plus/icons-vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import {
   compareIstudyLabStudents,
   compareIstudyStudents,
+  deleteIstudyLabReportFiles,
+  deleteIstudyLabSubmissionFiles,
+  deleteIstudySubmissionFiles,
+  deleteIstudyWorkFiles,
   exportIstudyLabReport,
   exportIstudyWork,
   fileDownloadUrl,
@@ -46,6 +50,11 @@ const gradeDrawer = ref(false)
 const gradeGroup = ref(null)
 const gradeRows = ref([])
 const gradeLoading = ref(false)
+
+const deleteDialog = ref(false)
+const deleteTarget = ref(null)
+const deleteAlsoResult = ref(false)
+const deleting = ref(false)
 
 let monitorTimer = null
 let monitorTicks = 0
@@ -359,11 +368,17 @@ async function downloadGroup(row) {
 }
 
 async function fetchGroupSubmissions(row) {
-  const requests = (row.classes || []).map((item) =>
-    row.source === 'lab'
-      ? listIstudyLabSubmissions(item.work_id)
-      : listIstudySubmissions(item.work_id),
-  )
+  const requests = (row.classes || []).map(async (item) => {
+    const rows =
+      row.source === 'lab'
+        ? await listIstudyLabSubmissions(item.work_id)
+        : await listIstudySubmissions(item.work_id)
+    return rows.map((submission) => ({
+      ...submission,
+      source: row.source,
+      container_id: item.work_id,
+    }))
+  })
   if (!requests.length) return []
   const result = await Promise.allSettled(requests)
   const fulfilled = result.filter((item) => item.status === 'fulfilled')
@@ -419,6 +434,56 @@ async function openGrades(row) {
   gradeRows.value = []
   gradeDrawer.value = true
   await loadGrades(row)
+}
+
+function openDeleteDialog(row, scope) {
+  deleteTarget.value = { row, scope }
+  deleteAlsoResult.value = false
+  deleteDialog.value = true
+}
+
+async function confirmDelete() {
+  const target = deleteTarget.value
+  if (!target) return
+  deleting.value = true
+  const total = { files: 0, freed_bytes: 0, results_deleted: 0 }
+  try {
+    if (target.scope === 'single') {
+      const result =
+        target.row.source === 'lab'
+          ? await deleteIstudyLabSubmissionFiles(target.row.id, deleteAlsoResult.value)
+          : await deleteIstudySubmissionFiles(target.row.id, deleteAlsoResult.value)
+      for (const key of Object.keys(total)) total[key] += Number(result[key] || 0)
+    } else {
+      for (const item of target.row.classes || []) {
+        const result =
+          target.row.source === 'lab'
+            ? await deleteIstudyLabReportFiles(item.work_id, deleteAlsoResult.value)
+            : await deleteIstudyWorkFiles(item.work_id, deleteAlsoResult.value)
+        for (const key of Object.keys(total)) total[key] += Number(result[key] || 0)
+      }
+    }
+    ElMessage.success(
+      `已删除 ${total.files} 个附件，释放 ${formatBytes(total.freed_bytes)}` +
+        (total.results_deleted ? `，同时删除 ${total.results_deleted} 条评分结果` : ''),
+    )
+    deleteDialog.value = false
+    if (detailDrawer.value && detailGroup.value) {
+      await loadDetails(detailGroup.value)
+    }
+    await loadLists()
+  } catch (error) {
+    ElMessage.error(`删除失败：${error.message}`)
+  } finally {
+    deleting.value = false
+  }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0)
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 
 onMounted(async () => {
@@ -602,6 +667,19 @@ onBeforeUnmount(stopMonitor)
     </section>
 
     <el-drawer v-model="detailDrawer" :title="`提交详情 · ${detailGroup?.name || ''}`" size="880px">
+      <div class="detail-toolbar">
+        <span>附件保存在本机，删除不会影响 i学习 上的学生提交。</span>
+        <el-button
+          type="danger"
+          plain
+          size="small"
+          :icon="Delete"
+          :disabled="!detailSummary.downloaded"
+          @click="openDeleteDialog(detailGroup, 'group')"
+        >
+          清空本次附件
+        </el-button>
+      </div>
       <div class="score-overview">
         <div><span>学生记录</span><strong>{{ detailSummary.total }}</strong></div>
         <div><span>i学习已有成绩</span><strong>{{ detailSummary.scored }}</strong></div>
@@ -637,6 +715,18 @@ onBeforeUnmount(stopMonitor)
         </el-table-column>
         <el-table-column label="提交时间" min-width="150">
           <template #default="{ row }">{{ formatDateTime(row.submitted_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="82" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="danger"
+              :disabled="row.file_state !== 'ready'"
+              @click="openDeleteDialog(row, 'single')"
+            >
+              删除
+            </el-button>
+          </template>
         </el-table-column>
       </el-table>
     </el-drawer>
@@ -698,5 +788,35 @@ onBeforeUnmount(stopMonitor)
         </el-table-column>
       </el-table>
     </el-drawer>
+
+    <el-dialog v-model="deleteDialog" title="删除本地附件" width="520px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        title="只会删除本机保存的附件文件，不会删除 i学习 上学生的原始提交。"
+      />
+      <div class="delete-target">
+        <span>删除范围</span>
+        <strong v-if="deleteTarget?.scope === 'group'">
+          {{ deleteTarget?.row?.name }} · 全部已下载附件
+        </strong>
+        <strong v-else>
+          {{ deleteTarget?.row?.student_name }}（{{ deleteTarget?.row?.student_no }}）
+        </strong>
+      </div>
+      <el-checkbox v-model="deleteAlsoResult">
+        同时删除对应的本地评分结果
+      </el-checkbox>
+      <p class="delete-help">
+        默认保留分数和评语，仅删除附件；以后重新评审需要重新下载。勾选后会删除本地
+        AI 评分结果，但不会修改 i学习 已有成绩。
+      </p>
+      <template #footer>
+        <el-button @click="deleteDialog = false">取消</el-button>
+        <el-button type="danger" :loading="deleting" @click="confirmDelete">
+          确认删除
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

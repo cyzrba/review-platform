@@ -922,17 +922,13 @@ def restore_grading_results(db: Session, rubric: Rubric) -> dict[str, int]:
     return {"created": created, "existing": len(existing) - created, "skipped": skipped}
 
 
-def delete_submission_files(
+def _clear_submission_files(
     db: Session,
     submission: IstudySubmission,
     *,
     also_result: bool = False,
 ) -> dict[str, int]:
-    """删除某个学生这次作业的**本地附件**，不影响 i学习 上的提交。
-
-    默认保留评分结果（分数 / 评语都还在），只是复核图片、重新评审需要重新下载附件；
-    ``also_result=True`` 时把对应的评分结果一起删掉。
-    """
+    """删除一组附件但暂不提交事务，供单个删除和整班删除复用。"""
     from ..storage import get_storage
 
     storage = get_storage()
@@ -978,13 +974,28 @@ def delete_submission_files(
             db.delete(row)
             results_deleted = 1
 
-    db.commit()
     return {
         "submissions": 1,
         "files": len(keys),
         "freed_bytes": freed,
         "results_deleted": results_deleted,
     }
+
+
+def delete_submission_files(
+    db: Session,
+    submission: IstudySubmission,
+    *,
+    also_result: bool = False,
+) -> dict[str, int]:
+    """删除某个学生这次作业的**本地附件**，不影响 i学习 上的提交。
+
+    默认保留评分结果（分数 / 评语都还在），只是复核图片、重新评审需要重新下载附件；
+    ``also_result=True`` 时把对应的评分结果一起删掉。
+    """
+    result = _clear_submission_files(db, submission, also_result=also_result)
+    db.commit()
+    return result
 
 
 def delete_work_files(
@@ -1002,9 +1013,10 @@ def delete_work_files(
     for row in rows:
         if not row.object_key and not row.files:
             continue
-        result = delete_submission_files(db, row, also_result=also_result)
+        result = _clear_submission_files(db, row, also_result=also_result)
         for key, value in result.items():
             total[key] += value
+    db.commit()
     return total
 
 

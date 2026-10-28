@@ -837,6 +837,76 @@ class IstudyClient:
         payload = resp.json()
         return list((payload.get("data") or {}).get("list") or [])
 
+    @staticmethod
+    def _check_lab_write(payload: dict[str, Any], action: str) -> dict[str, Any]:
+        code = payload.get("code")
+        if code not in (None, 1000) or payload.get("status") is False:
+            raise IstudyError(f"i学习 拒绝{action}：{payload.get('msg') or payload}")
+        return payload
+
+    async def lab_update_score(
+        self,
+        fill_id: str | int,
+        score: float,
+        *,
+        dept_id: str = "1860",
+    ) -> dict[str, Any]:
+        """更新实验报告总成绩，对应批阅列表里的单格成绩编辑。"""
+        fill_value: str | int = int(fill_id) if str(fill_id).isdigit() else str(fill_id)
+        resp = await self.client.post(
+            f"{LAB_API}/report/correction/updateScore",
+            json={
+                "id": fill_value,
+                "score": score,
+                "reason": "",
+                "base64List": [],
+                "type": 1,
+                "onlyEditScore": True,
+                "deptId": dept_id,
+                "fid": dept_id,
+            },
+        )
+        if resp.status_code >= 400:
+            raise IstudyError(
+                f"写入实验报告分数失败（{resp.status_code}），登录态可能已失效"
+            )
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise IstudyError("实验报告分数保存接口返回的不是 JSON") from exc
+        return self._check_lab_write(payload, "写入实验报告分数")
+
+    async def lab_submit_comment(
+        self,
+        fill_id: str | int,
+        total_score: float,
+        comment: str,
+        *,
+        dept_id: str = "1860",
+    ) -> dict[str, Any]:
+        """保存实验报告的最终总分和总评语。"""
+        fill_value: str | int = int(fill_id) if str(fill_id).isdigit() else str(fill_id)
+        resp = await self.client.post(
+            f"{LAB_API}/report/fill/comment/submitCommentByFillId",
+            json={
+                "fillId": fill_value,
+                "totalScore": total_score,
+                "overallComment": comment,
+                "deptId": dept_id,
+                "fid": dept_id,
+            },
+            timeout=70.0,
+        )
+        if resp.status_code >= 400:
+            raise IstudyError(
+                f"写入实验报告评语失败（{resp.status_code}），登录态可能已失效"
+            )
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise IstudyError("实验报告评语保存接口返回的不是 JSON") from exc
+        return self._check_lab_write(payload, "写入实验报告评语")
+
     async def lab_export_fill_pdf(
         self,
         report_id: str | int,

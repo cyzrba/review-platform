@@ -517,7 +517,8 @@ def istudy_grade_work(
         stmt = stmt.where(
             GradingResult.status.in_([ResultStatus.pending, ResultStatus.failed])
         )
-    result_ids = [row.id for row in db.execute(stmt).scalars().all()]
+    targets = list(db.execute(stmt).scalars().all())
+    result_ids = [row.id for row in targets]
 
     if not result_ids:
         return GradeRunResult(
@@ -526,6 +527,11 @@ def istudy_grade_work(
             message=f"「{work.name}」没有需要评审的记录（可能都评过了，或还没抓附件）",
         )
 
+    # 先统一标记为评审中再投递后台任务。Mock/视觉模型可能很快开始和结束，
+    # 如果不提前标记，前端第一次轮询可能仍看到旧的 graded 状态而提前结束。
+    for item in targets:
+        item.status = ResultStatus.grading
+    db.commit()
     enqueue_grading(result_ids)
     message = f"「{work.name}」已提交评审，共 {len(result_ids)} 条，用的细则：{rubric.name}"
     if switched and switched["moved"]:
@@ -817,6 +823,42 @@ def istudy_lab_report_submissions(
     return out
 
 
+@router.delete(
+    "/istudy/lab-submissions/{submission_id}/files",
+    response_model=IstudyFileDeleteResult,
+    summary="删除某个学生的本地实验报告附件（不影响 i学习）",
+)
+def istudy_delete_lab_submission_files(
+    submission_id: int,
+    also_result: bool = Query(False, description="同时删除对应的评分结果"),
+    db: Session = Depends(get_db),
+) -> IstudyFileDeleteResult:
+    row = db.get(IstudyLabSubmission, submission_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="实验报告提交记录不存在")
+    return IstudyFileDeleteResult(
+        **lab_sync.delete_submission_files(db, row, also_result=also_result)
+    )
+
+
+@router.delete(
+    "/istudy/lab-reports/{report_id}/files",
+    response_model=IstudyFileDeleteResult,
+    summary="清空某个班实验报告的本地附件（不影响 i学习）",
+)
+def istudy_delete_lab_report_files(
+    report_id: int,
+    also_result: bool = Query(False, description="同时删除这些学生的评分结果"),
+    db: Session = Depends(get_db),
+) -> IstudyFileDeleteResult:
+    report = db.get(IstudyLabReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="实验报告不存在")
+    return IstudyFileDeleteResult(
+        **lab_sync.delete_report_files(db, report, also_result=also_result)
+    )
+
+
 @router.get(
     "/istudy/lab-reports/{report_id}/students",
     response_model=IstudyWorkCompareOut,
@@ -880,7 +922,8 @@ def istudy_grade_lab_report(
         stmt = stmt.where(
             GradingResult.status.in_([ResultStatus.pending, ResultStatus.failed])
         )
-    result_ids = [row.id for row in db.execute(stmt).scalars().all()]
+    targets = list(db.execute(stmt).scalars().all())
+    result_ids = [row.id for row in targets]
 
     if not result_ids:
         return GradeRunResult(
@@ -889,6 +932,9 @@ def istudy_grade_lab_report(
             message=f"「{report.name}」没有需要评审的记录（可能都评过了，或还没抓作答）",
         )
 
+    for item in targets:
+        item.status = ResultStatus.grading
+    db.commit()
     enqueue_grading(result_ids)
     message = f"「{report.name}」已提交评审，共 {len(result_ids)} 条，用的细则：{rubric.name}"
     if switched and switched["moved"]:
@@ -896,3 +942,52 @@ def istudy_grade_lab_report(
     return GradeRunResult(
         queued=len(result_ids), result_ids=result_ids, rubric_id=rubric.id, message=message
     )
+
+
+@router.post(
+    "/istudy/lab-reports/{report_id}/backfill/preview",
+    response_model=IstudyBackfillPreviewOut,
+    summary="预览把实验报告分数回填到 i学习（不写入）",
+)
+async def istudy_lab_backfill_preview(
+    report_id: int,
+    payload: IstudyBackfillPreviewRequest | None = None,
+    db: Session = Depends(get_db),
+) -> IstudyBackfillPreviewOut:
+    report = db.get(IstudyLabReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="实验报告不存在")
+    request = payload or IstudyBackfillPreviewRequest()
+    try:
+        plan = await backfill.build_lab_preview(
+            db, report, class_id=request.class_id, overwrite=request.overwrite
+        )
+    except IstudyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return IstudyBackfillPreviewOut(**plan)
+
+
+@router.post(
+    "/istudy/lab-reports/{report_id}/backfill",
+    response_model=IstudyBackfillResultOut,
+    summary="把实验报告分数和评语写回 i学习",
+)
+async def istudy_lab_backfill_apply(
+    report_id: int,
+    payload: IstudyBackfillApplyRequest,
+    db: Session = Depends(get_db),
+) -> IstudyBackfillResultOut:
+    report = db.get(IstudyLabReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="实验报告不存在")
+    try:
+        result = await backfill.apply_lab_backfill(
+            db,
+            report,
+            student_ids=payload.student_ids,
+            overwrite=payload.overwrite,
+            write_comment=payload.write_comment,
+        )
+    except IstudyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return IstudyBackfillResultOut(**result)

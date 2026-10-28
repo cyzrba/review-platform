@@ -49,7 +49,7 @@ KIND_RULES: dict[str, dict] = {
     "lab_report": {
         "label": "实验报告",
         "preferred": {".pdf"},
-        "accepted": {".pdf", ".doc", ".docx", ".txt", ".md"},
+        "accepted": {".pdf"},
         "expect": "每个学生一个压缩包（学生名字_学号.zip），里面是 学生名字_学号.pdf",
     },
     "homework": {

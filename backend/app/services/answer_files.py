@@ -69,7 +69,27 @@ def prepare_for_llm(data: bytes, *, max_edge: int = 1600, quality: int = 85) -> 
 
         from PIL import Image, ImageOps
     except ImportError:  # 没装 Pillow 也能跑，只是不压缩
-        return data, "image/jpeg"
+        # PyMuPDF 已经是项目依赖，实验报告页面本身也是由它渲染出来的。
+        # 用它做基本的缩放和 JPEG 压缩，避免每次调用模型都传整张原图。
+        try:
+            import pymupdf
+
+            pixmap = pymupdf.Pixmap(data)
+            if pixmap.alpha:
+                pixmap = pymupdf.Pixmap(pixmap, 0)
+            longest = max(pixmap.width, pixmap.height)
+            if longest > max_edge:
+                scale = max_edge / longest
+                pixmap = pymupdf.Pixmap(
+                    pixmap,
+                    max(1, round(pixmap.width * scale)),
+                    max(1, round(pixmap.height * scale)),
+                )
+            return pixmap.tobytes("jpeg", jpg_quality=quality), "image/jpeg"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("图片压缩失败，按原图发送：%s", exc)
+            sniffed = _sniff_image(data)
+            return data, sniffed[0] if sniffed else "application/octet-stream"
 
     try:
         with Image.open(io.BytesIO(data)) as image:

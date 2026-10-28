@@ -13,6 +13,18 @@ from dataclasses import dataclass
 _counter = itertools.count(1)
 
 
+def pdf_bytes(label: str = "lab report") -> bytes:
+    """生成一个最小但真实可解析的 PDF，避免把扩展名伪装成 PDF 做端到端测试。"""
+    import pymupdf
+
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), label, fontsize=12)
+    payload = document.tobytes()
+    document.close()
+    return payload
+
+
 @dataclass
 class Fixture:
     tag: str
@@ -321,12 +333,12 @@ def test_lab_report_pipeline(client):
     outer = zip_bytes(
         {
             f"张三_{fixture.no_zhang}.zip": zip_bytes(
-                {f"张三_{fixture.no_zhang}.pdf": b"%PDF-1.4 fake"}
+                {f"张三_{fixture.no_zhang}.pdf": pdf_bytes("Zhang lab report")}
             ),
             f"李四_{fixture.no_li}.zip": zip_bytes(
-                {f"李四_{fixture.no_li}.pdf": b"%PDF-1.4 fake"}
+                {f"李四_{fixture.no_li}.pdf": pdf_bytes("Li lab report")}
             ),
-            "无名氏.zip": zip_bytes({"报告.pdf": b"%PDF-1.4 fake"}),
+            "无名氏.zip": zip_bytes({"报告.pdf": pdf_bytes("Unknown student")}),
         }
     )
     summary = upload(client, rubric_id, "实验一批次.zip", outer, course_id=fixture.course_id)
@@ -350,6 +362,7 @@ def test_lab_report_pipeline(client):
     assert all(0 < item["score"] <= 100 for item in rows)
     assert all(item["comment"] for item in rows)
     assert all(item["graded_at"] for item in rows)
+    assert all(item["images_sent"] == 1 for item in rows)
 
     # 按课程过滤
     assert len(results_of(client, rubric_id, course_id=fixture.course_id)) == 2

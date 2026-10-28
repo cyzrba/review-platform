@@ -50,7 +50,7 @@ from ..models import (
 from ..storage import get_storage
 from ..utils import guess_content_type, safe_filename, sha256_hex
 from . import archive
-from .answer_files import AnswerFileError, extract_lab_report
+from .answer_files import AnswerFileError, extract_lab_report, render_pdf_pages
 from .homework_sync import _content_fingerprint
 from .istudy import IstudyClient, IstudyError
 
@@ -207,7 +207,10 @@ async def scrape_course_reports(
     """抓一门课的实验报告列表，按班级展开成一条条记录。"""
     result = LabScrapeResult(cid=cid, cpi=cpi, course_name=course_name)
     async with IstudyClient() as client:
-        dept_id = await client.lab_dept_id(cid, cpi) if cpi else "1860"
+        dept_id = (
+            settings.istudy_lab_dept_id
+            or (await client.lab_dept_id(cid, cpi) if cpi else "1860")
+        )
         rows = await client.lab_reports(cid, dept_id=dept_id)
 
     for item in rows:
@@ -705,6 +708,53 @@ def _sync_report_students(db: Session, row: IstudyLabReport, item: ScrapedLabRep
     db.flush()
 
 
+def ensure_submission_preview_pages(db: Session, submission: IstudyLabSubmission) -> bool:
+    """给旧版已下载但没有页面图片的实验报告补渲染 PDF 页面。
+
+    新版下载会直接整页渲染；旧数据可能只保存了原始 PDF。复核时按需补齐，
+    后续再打开就直接读取数据库，不需要重复渲染。
+    """
+    if submission.files or not submission.object_key:
+        return False
+    report = submission.report
+    student = submission.student
+    if report is None or student is None:
+        return False
+    try:
+        payload = get_storage().get_bytes(submission.object_key)
+        bundle = render_pdf_pages(
+            payload,
+            stem=(submission.source_filename or "answer").rsplit(".", 1)[0],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("补渲染实验报告页面失败 submission=%s：%s", submission.id, exc)
+        return False
+    if not bundle.images:
+        return False
+
+    base = f"{report_prefix(report)}/students/{safe_filename(student.student_no)}/answer"
+    for image in bundle.images:
+        key = f"{base}/{image.seq:02d}-{safe_filename(image.filename)}"
+        get_storage().put_bytes(key, image.data, image.content_type)
+        db.add(
+            IstudyLabFile(
+                submission_id=submission.id,
+                seq=image.seq,
+                role="answer",
+                filename=image.filename,
+                object_key=key,
+                content_type=image.content_type,
+                size_bytes=len(image.data),
+                checksum=sha256_hex(image.data),
+            )
+        )
+    submission.image_count = len(bundle.images)
+    submission.extracted_text = bundle.text
+    db.commit()
+    db.refresh(submission)
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # 抓附件
 # --------------------------------------------------------------------------- #
@@ -1096,6 +1146,101 @@ def _mark_report_state(
     with_retry(action, what=f"更新实验报告抓取状态 report_id={report_id}")
 
 
+def _clear_submission_files(
+    db: Session,
+    submission: IstudyLabSubmission,
+    *,
+    also_result: bool = False,
+) -> dict[str, int]:
+    """删除一位学生的实验报告本地附件，不提交事务。"""
+    storage = get_storage()
+    file_keys = {item.object_key for item in submission.files if item.object_key}
+    keys = set(file_keys)
+    if submission.object_key:
+        keys.add(submission.object_key)
+
+    freed = sum(item.size_bytes or 0 for item in submission.files)
+    if submission.object_key and submission.object_key not in file_keys:
+        freed += submission.size_bytes or 0
+
+    for key in keys:
+        try:
+            storage.delete(key)
+        except Exception:  # noqa: BLE001
+            logger.exception("删除实验报告附件失败：%s", key)
+
+    for item in list(submission.files):
+        db.delete(item)
+    submission.object_key = None
+    submission.source_filename = None
+    submission.size_bytes = 0
+    submission.image_count = 0
+    submission.content_checksum = None
+    submission.extracted_text = None
+    submission.file_state = FileState.none
+    submission.error_message = None
+
+    results_deleted = 0
+    rubric_id = submission.report.rubric_id if submission.report else None
+    if also_result and rubric_id:
+        row = (
+            db.execute(
+                select(GradingResult).where(
+                    GradingResult.rubric_id == rubric_id,
+                    GradingResult.student_id == submission.student_id,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is not None:
+            db.delete(row)
+            results_deleted = 1
+
+    return {
+        "submissions": 1,
+        "files": len(keys),
+        "freed_bytes": freed,
+        "results_deleted": results_deleted,
+    }
+
+
+def delete_submission_files(
+    db: Session,
+    submission: IstudyLabSubmission,
+    *,
+    also_result: bool = False,
+) -> dict[str, int]:
+    result = _clear_submission_files(db, submission, also_result=also_result)
+    db.commit()
+    return result
+
+
+def delete_report_files(
+    db: Session,
+    report: IstudyLabReport,
+    *,
+    also_result: bool = False,
+) -> dict[str, int]:
+    """清空一个班的实验报告本地附件，默认保留分数与评语。"""
+    rows = (
+        db.execute(
+            select(IstudyLabSubmission).where(IstudyLabSubmission.report_id == report.id)
+        )
+        .scalars()
+        .all()
+    )
+    total = {"submissions": 0, "files": 0, "freed_bytes": 0, "results_deleted": 0}
+    for row in rows:
+        if not row.object_key and not row.files:
+            continue
+        result = _clear_submission_files(db, row, also_result=also_result)
+        for key, value in result.items():
+            total[key] += value
+    db.commit()
+    return total
+
+
 async def _download_report_zip(
     cid: str, istudy_report_id: str, dept_id: str, fill_ids: list[str]
 ) -> bytes:
@@ -1130,7 +1275,7 @@ def run_report_export(report_id: int, fill_ids: list[str] | None = None) -> None
         ids = [str(item.istudy_fill_id) for item in targets if item.istudy_fill_id]
         cid = report.course.istudy_cid if report.course else ""
         istudy_report_id = report.istudy_report_id
-        dept_id = report.istudy_dept_id or "1860"
+        dept_id = settings.istudy_lab_dept_id or report.istudy_dept_id or "1860"
         name = report.name
     finally:
         db.close()
@@ -1227,7 +1372,8 @@ async def compare_report_students(db: Session, report: IstudyLabReport) -> dict[
 
     async with IstudyClient() as client:
         istudy_rows = await client.lab_corrections(
-            report.istudy_report_id, dept_id=report.istudy_dept_id or "1860"
+            report.istudy_report_id,
+            dept_id=settings.istudy_lab_dept_id or report.istudy_dept_id or "1860",
         )
 
     students: dict[int, Student] = {}

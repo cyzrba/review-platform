@@ -90,6 +90,10 @@ export const previewIstudyBackfill = (workId, payload = {}) =>
   http.post(`/istudy/works/${workId}/backfill/preview`, payload).then((r) => r.data)
 export const applyIstudyBackfill = (workId, payload) =>
   http.post(`/istudy/works/${workId}/backfill`, payload).then((r) => r.data)
+export const previewIstudyLabBackfill = (reportId, payload = {}) =>
+  http.post(`/istudy/lab-reports/${reportId}/backfill/preview`, payload).then((r) => r.data)
+export const applyIstudyLabBackfill = (reportId, payload) =>
+  http.post(`/istudy/lab-reports/${reportId}/backfill`, payload).then((r) => r.data)
 export const deleteIstudySubmissionFiles = (submissionId, alsoResult = false) =>
   http
     .delete(`/istudy/submissions/${submissionId}/files`, {
@@ -112,6 +116,18 @@ export const exportIstudyLabReport = (reportId, payload = {}) =>
   http.post(`/istudy/lab-reports/${reportId}/export`, payload).then((r) => r.data)
 export const listIstudyLabSubmissions = (reportId) =>
   http.get(`/istudy/lab-reports/${reportId}/submissions`).then((r) => r.data)
+export const deleteIstudyLabSubmissionFiles = (submissionId, alsoResult = false) =>
+  http
+    .delete(`/istudy/lab-submissions/${submissionId}/files`, {
+      params: { also_result: alsoResult },
+    })
+    .then((r) => r.data)
+export const deleteIstudyLabReportFiles = (reportId, alsoResult = false) =>
+  http
+    .delete(`/istudy/lab-reports/${reportId}/files`, {
+      params: { also_result: alsoResult },
+    })
+    .then((r) => r.data)
 export const compareIstudyLabStudents = (reportId) =>
   http.get(`/istudy/lab-reports/${reportId}/students`).then((r) => r.data)
 export const gradeIstudyLabReport = (reportId, payload = {}) =>

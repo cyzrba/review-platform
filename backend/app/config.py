@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     local_storage_dir: str = str(DATA_DIR / "objects")
 
     # AI 评审
-    ai_reviewer: str = "mock"  # mock | llm
+    # 生产默认必须走真实模型；mock 仅供测试显式启用。
+    ai_reviewer: str = "llm"  # llm | mock
     ai_review_workers: int = 2
 
     # 大模型评审（OpenAI 兼容接口，DeepSeek 也是这一套）
@@ -63,6 +64,9 @@ class Settings(BaseSettings):
 
     # i学习 抓取（借本机 Edge 调试端口读取登录态）
     istudy_cdp_port: int = 9222
+    # 实验报告 SPA 使用的机构 id，可能与 Cookie 里的学校 fid 不同。
+    # 留空时沿用抓取到的值；当前学校需要设为 295144。
+    istudy_lab_dept_id: str = ""
 
     # CORS，逗号分隔
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

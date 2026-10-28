@@ -54,6 +54,7 @@ def test_lab_report_unwraps_student_zip():
         {
             "张三_2023010101.zip": inner,
             "李四_2023010102.zip": zip_bytes({"李四_2023010102.pdf": b"%PDF-1.4 fake"}),
+            "李四_2023010102.docx": b"legacy-word-file",
             ".DS_Store": b"junk",
             "__MACOSX/._x": b"junk",
         }
@@ -63,7 +64,7 @@ def test_lab_report_unwraps_student_zip():
 
     assert [doc.name for doc in documents] == ["张三_2023010101.pdf", "李四_2023010102.pdf"]
     assert documents[0].parents == ["张三_2023010101.zip"]
-    assert skipped == []
+    assert [issue.filename for issue in skipped] == ["李四_2023010102.docx"]
 
 
 def test_homework_keeps_only_word_files():

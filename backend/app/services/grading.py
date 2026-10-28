@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import session_scope, with_retry
-from ..models import GradingResult, IstudyWork, ResultStatus
+from ..models import GradingKind, GradingResult, IstudyWork, ResultStatus
 from ..storage import get_storage
-from .answer_files import prepare_for_llm
+from .answer_files import AnswerFileError, extract_lab_report, prepare_for_llm
 from .document import DocumentParseError, extract_text
 from .llm_client import ImagePart
 from .reviewer import ReviewContext, get_reviewer
@@ -38,7 +38,13 @@ def _build_context(db: Session, result: GradingResult) -> ReviewContext:
     rubric = result.rubric
     student = result.student
     materials = {item.role: item for item in rubric.attachments}
-    reference_limit = max(1, settings.llm_max_images - 6)
+    # 实验报告最多能到十几页，先保证学生整份报告有足够页数进入模型；
+    # 参考 PDF 通常只需前几页的任务说明和标准答案。
+    reference_limit = (
+        min(4, max(0, settings.llm_max_images - 1))
+        if rubric.kind == GradingKind.lab_report
+        else max(1, settings.llm_max_images - 6)
+    )
     reference_images = _collect_reference_images(
         materials.get(ROLE_REFERENCE), limit=reference_limit
     )
@@ -54,13 +60,38 @@ def _build_context(db: Session, result: GradingResult) -> ReviewContext:
         text = submission.extracted_text
         payload = b""
     else:
-        # 手工上传的提交：还是走「读文件 + 抽文本」的老路
+        # 手工上传的提交。
         payload = get_storage().get_bytes(result.object_key)
-        try:
-            text = extract_text(result.source_filename, result.content_type, payload)
-        except DocumentParseError as exc:
-            logger.info("未能抽取文本（%s）：%s", result.source_filename, exc)
-            text = None
+        if rubric.kind == GradingKind.lab_report:
+            # 实验报告固定为 PDF。文本层用来提供题目、章节和数值，
+            # 整页图片则保留公式、表格、曲线图等视觉证据。
+            try:
+                bundle = extract_lab_report(result.source_filename, payload)
+                text = bundle.text
+                remaining = max(0, settings.llm_max_images - len(images))
+                for item in bundle.images[:remaining]:
+                    prepared, content_type = prepare_for_llm(
+                        item.data,
+                        max_edge=settings.llm_image_max_edge,
+                        quality=settings.llm_image_quality,
+                    )
+                    images.append(
+                        ImagePart(
+                            filename=item.filename,
+                            content_type=content_type,
+                            data=prepared,
+                            role="answer",
+                        )
+                    )
+            except AnswerFileError as exc:
+                logger.info("实验报告 PDF 解析失败（%s）：%s", result.source_filename, exc)
+                text = None
+        else:
+            try:
+                text = extract_text(result.source_filename, result.content_type, payload)
+            except DocumentParseError as exc:
+                logger.info("未能抽取文本（%s）：%s", result.source_filename, exc)
+                text = None
 
     return ReviewContext(
         rubric_name=rubric.name,
@@ -133,6 +164,10 @@ def collect_answer_image_rows(db: Session, result: GradingResult) -> list[tuple[
         lab = _find_lab_submission(db, result)
         if lab is None:
             return []
+        if not lab.files:
+            from .lab_sync import ensure_submission_preview_pages
+
+            ensure_submission_preview_pages(db, lab)
         return [(item, "answer") for item in lab.files]
 
     work = db.get(IstudyWork, submission.work_id)

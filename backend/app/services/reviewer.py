@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from ..config import settings
@@ -106,36 +108,73 @@ class LLMReviewer(BaseReviewer):
     name = "llm"
 
     def review(self, context: ReviewContext) -> ReviewOutcome:
-        system_prompt = (
-            "你是一名严格但公正的大学课程助教，负责批改学生的作业。"
-            "你会拿到题目图片和学生的手写作答照片，请按老师给的评分细则打分。"
-            "只依据图片里实际写的内容给分，不要臆测学生没写的东西。"
-            "字迹潦草本身不扣分（除非评分细则里明确有书写分）。"
-        )
+        if context.kind == "lab_report":
+            system_prompt = (
+                "你是一名严格但公正的大学实验课助教，负责批改学生提交的 PDF 实验报告。"
+                "学生报告页面按 PDF 页序提供。实验原理、公式、数据表、图表和计算过程"
+                "都要结合页面视觉核对；PDF 文本层中的乱码或缺失不能当作学生未写。"
+                "只依据报告页面和老师给的评分细则给分，不要臆测学生没写的内容。"
+                "字迹潦草本身不扣分（除非评分细则明确有书写分）。"
+            )
+        else:
+            system_prompt = (
+                "你是一名严格但公正的大学课程助教，负责批改学生的作业。"
+                "你会拿到题目图片和学生的手写作答照片，请按老师给的评分细则打分。"
+                "只依据图片里实际写的内容给分，不要臆测学生没写的东西。"
+                "字迹潦草本身不扣分（除非评分细则里明确有书写分）。"
+            )
         user_prompt = build_review_prompt(context)
         messages = build_messages(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             images=context.images,
         )
-        result = chat(messages, images_sent=len(context.images))
-        payload = parse_json_object(result.text)
-
-        raw_score = payload.get("score")
-        try:
-            score = float(raw_score)
-        except (TypeError, ValueError) as exc:
-            raise LLMError(f"模型给的分数不是数字：{raw_score!r}") from exc
         limit = context.total_score or 100.0
-        score = max(0.0, min(score, float(limit)))
+        expected_items = rubric_breakdown_items(context)
+        result = None
+        payload: dict[str, Any] | None = None
+        breakdown: list[dict[str, Any]] | None = None
+        score: float | None = None
+        validation_error: LLMError | None = None
+        for attempt in range(2):
+            result = chat(messages, images_sent=len(context.images))
+            try:
+                payload = parse_json_object(result.text)
+                breakdown, score = _validated_breakdown_total(
+                    payload.get("breakdown"), limit, expected_items=expected_items
+                )
+                break
+            except LLMError as exc:
+                validation_error = exc
+                if attempt == 0:
+                    messages.extend(
+                        [
+                            {"role": "assistant", "content": result.text},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"上一次输出未通过后端校验：{exc}。"
+                                    "请重新检查报告，只返回合法的 JSON。"
+                                    "breakdown 必须使用指定的大项，且每个大项的 score "
+                                    "是该大项的最终得分，不是小项满分之和。"
+                                ),
+                            },
+                        ]
+                    )
+        if result is None or payload is None or breakdown is None or score is None:
+            raise validation_error or LLMError("模型没有返回可用的评分结果")
 
         comment = str(payload.get("comment") or "").strip()
-        breakdown = payload.get("breakdown")
-        if breakdown:
-            lines = [f"{item.get('item', '')}：{item.get('score', '')}".strip("：")
-                     for item in breakdown if isinstance(item, dict)]
-            if lines:
-                comment = "【分项】" + "；".join(lines) + "\n" + comment
+        raw_total = _optional_decimal(payload.get("score"))
+
+        lines = [f"{item['item']}：{item['score']:g}" for item in breakdown]
+        comment = "【分项】" + "；".join(lines) + "\n" + comment
+        if raw_total is None or raw_total != Decimal(str(score)):
+            reported = "未返回有效总分" if raw_total is None else f"{raw_total:g}"
+            comment += (
+                f"\n（模型返回总分 {reported}，分项合计 {score:g}；"
+                "最终总分以后端分项合计为准）"
+            )
 
         return ReviewOutcome(
             total_score=score,
@@ -148,6 +187,114 @@ class LLMReviewer(BaseReviewer):
             completion_tokens=result.completion_tokens,
             images_sent=result.images_sent,
         )
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    """解析模型总分；它只用于校对，不作为最终成绩。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _validated_breakdown_total(
+    breakdown: Any,
+    limit: float,
+    *,
+    expected_items: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], float]:
+    """校验模型返回的每个分项，并由后端计算唯一可信的总分。"""
+    if not isinstance(breakdown, list) or not breakdown:
+        raise LLMError("模型没有返回分项得分，无法由后端核算总分")
+
+    max_score = Decimal(str(limit))
+    normalized: list[dict[str, Any]] = []
+    names: set[str] = set()
+    total = Decimal("0")
+    for index, item in enumerate(breakdown, start=1):
+        if not isinstance(item, dict):
+            raise LLMError(f"第 {index} 个评分分项格式不正确")
+        name = str(item.get("item") or "").strip()
+        if not name:
+            raise LLMError(f"第 {index} 个评分分项缺少名称")
+        key = name.casefold()
+        if key in names:
+            raise LLMError(f"评分分项重复：{name}")
+        names.add(key)
+
+        value = item.get("score")
+        score = _optional_decimal(value)
+        if score is None:
+            raise LLMError(f"评分分项「{name}」的得分不是有效数字：{value!r}")
+        if score < 0:
+            raise LLMError(f"评分分项「{name}」不能为负数：{score:g}")
+        if score > max_score:
+            raise LLMError(f"评分分项「{name}」超过满分：{score:g} > {max_score:g}")
+
+        total += score
+        normalized.append({"item": name, "score": float(score)})
+
+    if expected_items:
+        actual_names = [_normalize_item_name(item["item"]) for item in normalized]
+        expected_names = [_normalize_item_name(item) for item in expected_items]
+        if actual_names != expected_names:
+            expected_text = "；".join(expected_items)
+            actual_text = "；".join(item["item"] for item in normalized)
+            raise LLMError(
+                "分项名称或顺序不符合评分细则。"
+                f"要求：{expected_text}。实际：{actual_text}"
+            )
+
+    if total > max_score:
+        raise LLMError(f"分项合计 {total:g} 超过满分 {max_score:g}")
+
+    final_score = float(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return normalized, final_score
+
+
+def _normalize_item_name(value: str) -> str:
+    name = value.strip()
+    name = re.sub(r"^[一二三四五六七八九十]+、\s*", "", name)
+    name = re.sub(r"^\d+[.、]\s*", "", name)
+    name = re.sub(r"[（(][^（）()]*[）)]\s*$", "", name)
+    return re.sub(r"\s+", "", name).casefold()
+
+
+_TOP_LEVEL_HEADING = re.compile(
+    r"^\s*([一二三四五六七八九十]+)、\s*(.+?)\s*$", re.MULTILINE
+)
+
+
+def rubric_breakdown_items(context: ReviewContext) -> list[str]:
+    """从评分标准中提取固定的大项，作为 breakdown 的唯一汇总层级。
+
+    大项内部的小点用于解释扣分，不参与 breakdown，避免同一份细则有时按
+    3 个大项返回、有时按十几个小点返回。
+    """
+    sources = [
+        context.criteria_document_text,
+        context.criteria,
+        context.rubric_description,
+    ]
+    for source in sources:
+        if not source:
+            continue
+        block = source
+        if "【评分标准】" in block:
+            block = block.split("【评分标准】", 1)[1]
+        if "【输出格式要求】" in block:
+            block = block.split("【输出格式要求】", 1)[0]
+        items = []
+        for match in _TOP_LEVEL_HEADING.finditer(block):
+            title = re.sub(r"[（(][^（）()]*[）)]\s*$", "", match.group(2)).strip()
+            if title:
+                items.append(title)
+        if len(items) >= 2:
+            return items
+    return []
 
 
 _REVIEWERS: dict[str, type[BaseReviewer]] = {
@@ -183,6 +330,7 @@ def build_review_prompt(context: ReviewContext) -> str:
         "",
         f"满分：{context.total_score:g} 分。",
     ]
+    expected_items = rubric_breakdown_items(context)
     if context.criteria_document_text:
         lines += ["", "【Word 评分标准】", context.criteria_document_text]
     if context.reference_text:
@@ -198,7 +346,12 @@ def build_review_prompt(context: ReviewContext) -> str:
     if questions:
         lines.append(f"其中 {len(questions)} 张是题目图片（题面）。")
     if answers:
-        lines.append(f"最后 {len(answers)} 张是这位学生的手写作答。")
+        answer_label = (
+            "这位学生提交的实验报告页面，已按 PDF 页序排列"
+            if context.kind == "lab_report"
+            else "这位学生的手写作答"
+        )
+        lines.append(f"最后 {len(answers)} 张是{answer_label}。")
     if not context.images:
         lines.append("这次没有可用的图片。")
 
@@ -217,6 +370,16 @@ def build_review_prompt(context: ReviewContext) -> str:
         "- comment 用中文写 2~4 句，说清楚「哪几点做到了、哪几点扣分、扣在哪一步」，要引用学生解答里的具体内容，不要写空话；",
         "- 学生没写、写错、或者只写结论没有过程，都要在评语里指出来。",
     ]
+    if expected_items:
+        lines += [
+            "",
+            "【分项汇总约束】",
+            "breakdown 必须且只能返回以下大项，名称和顺序必须完全一致：",
+            *[f"{index}. {item}" for index, item in enumerate(expected_items, start=1)],
+            "大项内部的小点、扣分依据和判定过程写进 comment，严禁把小点混入 breakdown。",
+            "每个大项的 score 是该大项扣除错误后的最终得分，不是满分、不是扣分，"
+            "也不是大项内部各小项得分之和；所有大项最终得分之和就是总分。",
+        ]
     return "\n".join(lines)
 
 

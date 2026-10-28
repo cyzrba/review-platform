@@ -6,8 +6,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   PAGE_SIZE,
   applyIstudyBackfill,
+  applyIstudyLabBackfill,
   classSummary,
-  deleteResult,
   exportCsvUrl,
   exportXlsxUrl,
   fileDownloadUrl,
@@ -22,6 +22,7 @@ import {
   listResults,
   listRubrics,
   previewIstudyBackfill,
+  previewIstudyLabBackfill,
   restoreRubricResults,
   runGrading,
   runSingleGrading,
@@ -55,6 +56,7 @@ const drawerVisible = ref(false)
 const current = ref(null)
 const currentImages = ref([])
 const imagesLoading = ref(false)
+const pdfViewMode = ref('pages')
 const editForm = reactive({ score: null, comment: '' })
 const savingResult = ref(false)
 
@@ -99,6 +101,16 @@ const reviewPendingCount = computed(() => {
   return Math.max(0, (row.result_count || 0) - (row.graded_count || 0))
 })
 
+// 勾选“已评审过的也重新评一遍”后，实际提交的是全部记录，不能继续显示待评数。
+const reviewSelectedCount = computed(() => {
+  const group = reviewGroup.value
+  if (!group) return null
+  if (!reviewForce.value) return reviewPendingCount.value
+  if (reviewClassId.value === 'all') return group.result_count || 0
+  const row = (group.classes || []).find((item) => item.class_id === reviewClassId.value)
+  return row?.result_count || 0
+})
+
 /** 'all' 表示不传这个筛选条件。 */
 function classParam(value) {
   return value === 'all' || value === null || value === undefined ? undefined : value
@@ -109,6 +121,10 @@ const kindRubrics = computed(() => rubrics.value.filter((item) => item.kind === 
 // 免得把作业的细则套到实验报告上
 const resultRubricOptions = computed(() => kindRubrics.value)
 const isLab = computed(() => kind.value === 'lab_report')
+const currentIsLab = computed(() => resultsRubric.value?.kind === 'lab_report' || isLab.value)
+const currentPdfUrl = computed(() =>
+  current.value?.object_key ? fileDownloadUrl(current.value.object_key) : '',
+)
 const pendingCount = computed(
   () => results.value.items.filter((item) => item.status === 'pending' || item.status === 'failed').length,
 )
@@ -259,8 +275,13 @@ async function onKindChange() {
 }
 
 async function onRubricChange() {
+  // 顶部作业/实验切换后，下面的成绩卡和评审按钮必须指向同一份细则。
+  // 否则会出现顶部显示 A、表格实际读取并重新评审 B 的状态错位。
+  resultsRubricId.value = rubricId.value
+  resultsClassId.value = 'all'
   if (rubricId.value) router.replace(`/grading/${rubricId.value}`)
   await loadRubric()
+  await loadResultsRubric()
 }
 
 function onResultsRubricChange() {
@@ -270,14 +291,24 @@ function onResultsRubricChange() {
 
 async function pollUntilDone() {
   polling.value = true
+  let latestRubric = null
   for (let i = 0; i < 60; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     await loadResults(results.value.page)
-    if (!results.value.items.some((item) => item.status === 'grading')) break
+    // 表格只显示当前分页；是否真的评完必须看整份细则的全局统计，
+    // 否则第 2 页仍在评审时，第 1 页可能已经看不到 grading 状态。
+    latestRubric = await getRubric(resultsRubricId.value)
+    resultsRubric.value = latestRubric
+    if (rubricId.value === resultsRubricId.value) rubric.value = latestRubric
+    if (!latestRubric.stats.pending_count) break
   }
   polling.value = false
   await refreshResults()
-  ElMessage.success('评审完成')
+  if (latestRubric?.stats.failed_count) {
+    ElMessage.warning(`评审结束，有 ${latestRubric.stats.failed_count} 条失败，请检查`)
+  } else {
+    ElMessage.success('评审完成')
+  }
 }
 
 /** 打开「一键 AI 评审」：在这里挑这次作业用哪一份评分细则。 */
@@ -366,6 +397,7 @@ function openResult(row) {
   editForm.score = row.score
   editForm.comment = row.comment || ''
   drawerVisible.value = true
+  pdfViewMode.value = 'pages'
   loadResultImages(row.id)
 }
 
@@ -375,6 +407,9 @@ async function loadResultImages(resultId) {
   imagesLoading.value = true
   try {
     currentImages.value = await getResultImages(resultId)
+    if (currentIsLab.value && !currentImages.value.length) {
+      pdfViewMode.value = 'pdf'
+    }
   } catch (error) {
     currentImages.value = []
   } finally {
@@ -398,17 +433,6 @@ async function saveResult() {
     ElMessage.error(error.message)
   } finally {
     savingResult.value = false
-  }
-}
-
-async function removeResult(row) {
-  await ElMessageBox.confirm(`删除 ${row.student_name} 的评分结果？`, '警告', { type: 'warning' })
-  try {
-    await deleteResult(row.id)
-    ElMessage.success('已删除')
-    await refreshResults()
-  } catch (error) {
-    ElMessage.error(error.message)
   }
 }
 
@@ -508,12 +532,17 @@ async function openBackfillForRubric() {
   if (!resultsRubricId.value || !courseId.value) return
   backfillFinding.value = true
   try {
-    const page = await listIstudyWorks({ course_id: courseId.value })
+    const isLabReport = resultsRubric.value?.kind === 'lab_report'
+    const page = isLabReport
+      ? await listIstudyLabReports({ course_id: courseId.value })
+      : await listIstudyWorks({ course_id: courseId.value })
     const row = (page.items || []).find((item) =>
       (item.rubric_ids || []).includes(resultsRubricId.value),
     )
     if (!row) {
-      ElMessage.warning('没有找到这份评分细则对应的 i学习 作业')
+      ElMessage.warning(
+        `没有找到这份评分细则对应的 i学习${isLabReport ? '实验报告' : '作业'}`,
+      )
       return
     }
     await openBackfill(row)
@@ -529,7 +558,10 @@ async function loadBackfillPreview() {
   backfillLoading.value = true
   try {
     const classes = backfillWork.value?.classes || []
-    const plan = await previewIstudyBackfill(backfillWorkId.value, {
+    const request = backfillWork.value?.source === 'lab'
+      ? previewIstudyLabBackfill
+      : previewIstudyBackfill
+    const plan = await request(backfillWorkId.value, {
       overwrite: backfillOverwrite.value,
       // 卡片按班级筛选时，这行只剩一个班；没筛选时一次覆盖这次作业的所有班
       class_id: classes.length === 1 ? classes[0].class_id ?? undefined : undefined,
@@ -567,7 +599,10 @@ async function runBackfill() {
   try {
     for (let index = 0; index < targets.length; index += chunkSize) {
       const chunk = targets.slice(index, index + chunkSize)
-      const result = await applyIstudyBackfill(backfillWorkId.value, {
+      const request = backfillWork.value?.source === 'lab'
+        ? applyIstudyLabBackfill
+        : applyIstudyBackfill
+      const result = await request(backfillWorkId.value, {
         student_ids: chunk.map((row) => row.student_id),
         overwrite: backfillOverwrite.value,
         write_comment: backfillWriteComment.value,
@@ -730,11 +765,11 @@ onBeforeUnmount(stopBackfillGateTimer)
           </el-select>
           <el-button @click="refreshResults">刷新</el-button>
           <el-button
-            v-if="resultsRubric?.source?.startsWith('istudy') && !resultsRubric?.stats?.result_count"
+            v-if="resultsRubric?.source?.startsWith('istudy')"
             :loading="restoringResults"
             @click="restoreDownloadedResults"
           >
-            恢复已下载提交
+            恢复缺失评审记录
           </el-button>
           <el-tag v-if="polling" type="warning">评审中…</el-tag>
           <el-button type="primary" :disabled="!resultsRubricId" @click="openReviewDialog">
@@ -745,7 +780,7 @@ onBeforeUnmount(stopBackfillGateTimer)
             }}
           </el-button>
           <el-button
-            v-if="resultsRubric?.kind === 'homework'"
+            v-if="resultsRubric?.source?.startsWith('istudy')"
             :loading="backfillFinding"
             :disabled="!resultsRubric?.stats?.graded_count"
             @click="openBackfillGate"
@@ -784,12 +819,11 @@ onBeforeUnmount(stopBackfillGateTimer)
             </template>
           </el-table-column>
           <el-table-column prop="comment" label="评语" min-width="180" show-overflow-tooltip />
-          <el-table-column label="操作" width="210" fixed="right">
+          <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openResult(row)">复核</el-button>
               <el-button link @click="runOne(row)">重新评审</el-button>
               <el-button link @click="download(row.object_key)">下载</el-button>
-              <el-button link type="danger" @click="removeResult(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -844,7 +878,7 @@ onBeforeUnmount(stopBackfillGateTimer)
       description="请选择作业"
     />
 
-    <el-drawer v-model="drawerVisible" title="评分复核" size="760px">
+    <el-drawer v-model="drawerVisible" title="评分复核" :size="currentIsLab ? '980px' : '760px'">
       <template v-if="current">
         <el-descriptions :column="2" border size="small" style="margin-bottom: 16px">
           <el-descriptions-item label="学生">
@@ -867,30 +901,80 @@ onBeforeUnmount(stopBackfillGateTimer)
           </el-descriptions-item>
         </el-descriptions>
 
-        <div style="font-weight: 600; margin-bottom: 8px">作业图片</div>
-        <div v-loading="imagesLoading" style="min-height: 40px; margin-bottom: 18px">
-          <div v-if="currentImages.length" style="display: flex; flex-wrap: wrap; gap: 10px">
-            <div
-              v-for="(image, index) in currentImages"
-              :key="image.object_key"
-              style="text-align: center"
+        <template v-if="currentIsLab">
+          <div class="pdf-preview-heading">
+            <div>
+              <strong>学生实验报告 PDF</strong>
+              <span>{{ current.source_filename }}</span>
+            </div>
+            <el-button
+              v-if="currentPdfUrl"
+              link
+              type="primary"
+              @click="download(current.object_key)"
             >
-              <el-image
-                :src="fileDownloadUrl(image.object_key)"
-                :preview-src-list="resultImageList()"
-                :initial-index="index"
-                fit="cover"
-                lazy
-                preview-teleported
-                style="width: 104px; height: 104px; border-radius: 6px; border: 1px solid #e6eaf0"
-              />
-              <div class="muted" style="font-size: 12px; margin-top: 4px">
-                {{ image.role === 'question' ? '题目' : '作答' }}
+              在新窗口打开
+            </el-button>
+          </div>
+          <el-tabs v-if="currentPdfUrl" v-model="pdfViewMode" class="lab-pdf-tabs">
+            <el-tab-pane label="逐页阅读" name="pages">
+              <div v-loading="imagesLoading" class="pdf-page-list">
+                <figure v-for="(image, index) in currentImages" :key="image.object_key">
+                  <el-image
+                    :src="fileDownloadUrl(image.object_key)"
+                    :preview-src-list="resultImageList()"
+                    :initial-index="index"
+                    fit="contain"
+                    preview-teleported
+                    class="pdf-page-image"
+                  />
+                  <figcaption>第 {{ index + 1 }} 页</figcaption>
+                </figure>
+                <el-empty
+                  v-if="!imagesLoading && !currentImages.length"
+                  description="没有可显示的 PDF 页面"
+                  :image-size="72"
+                />
+              </div>
+            </el-tab-pane>
+            <el-tab-pane label="原始 PDF" name="pdf">
+              <div class="pdf-preview">
+                <iframe
+                  :src="currentPdfUrl"
+                  :title="`${current.student_name}的实验报告`"
+                />
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+          <el-empty v-else description="没有可预览的实验报告 PDF" :image-size="72" />
+        </template>
+
+        <template v-else>
+          <div style="font-weight: 600; margin-bottom: 8px">作业图片</div>
+          <div v-loading="imagesLoading" style="min-height: 40px; margin-bottom: 18px">
+            <div v-if="currentImages.length" style="display: flex; flex-wrap: wrap; gap: 10px">
+              <div
+                v-for="(image, index) in currentImages"
+                :key="image.object_key"
+                style="text-align: center"
+              >
+                <el-image
+                  :src="fileDownloadUrl(image.object_key)"
+                  :preview-src-list="resultImageList()"
+                  :initial-index="index"
+                  fit="cover"
+                  lazy
+                  preview-teleported
+                  style="width: 104px; height: 104px; border-radius: 6px; border: 1px solid #e6eaf0"
+                />
+                <div class="muted" style="font-size: 12px; margin-top: 4px">
+                  {{ image.role === 'question' ? '题目' : '作答' }}
+                </div>
               </div>
             </div>
+            <div v-else-if="!imagesLoading" class="muted">没有可显示的图片（多半是没抓过附件）</div>
           </div>
-          <div v-else-if="!imagesLoading" class="muted">没有可显示的图片（多半是没抓过附件）</div>
-        </div>
+        </template>
 
         <el-alert
           v-if="current.error_message"
@@ -954,9 +1038,9 @@ onBeforeUnmount(stopBackfillGateTimer)
           :closable="false"
           style="margin-top: 16px"
           :title="
-            reviewPendingCount === null
+            reviewSelectedCount === null
               ? '还没抓过附件'
-              : `本次将评审 ${reviewPendingCount} 条记录（满分 ${reviewRubric?.total_score ?? 100}）`
+              : `本次将评审 ${reviewSelectedCount} 条记录（满分 ${reviewRubric?.total_score ?? 100}）`
           "
         />
         <el-alert
@@ -976,7 +1060,7 @@ onBeforeUnmount(stopBackfillGateTimer)
           :disabled="
             !reviewRubricId ||
             reviewMissingMaterials.length ||
-            (!reviewForce && !reviewPendingCount)
+            !reviewSelectedCount
           "
           @click="submitReview"
         >
