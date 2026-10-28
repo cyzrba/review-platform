@@ -8,7 +8,9 @@ import {
   compareIstudyStudents,
   exportIstudyLabReport,
   exportIstudyWork,
+  fileDownloadUrl,
   getIstudyStatus,
+  listCourseClasses,
   listCourses,
   listIstudyLabReports,
   listIstudyLabSubmissions,
@@ -23,6 +25,8 @@ const emptyList = () => ({ items: [], total: 0, last_synced_at: null })
 
 const courses = ref([])
 const courseId = ref(null)
+const courseClasses = ref([])
+const classId = ref('all')
 const source = ref('work')
 const workData = ref(emptyList())
 const labData = ref(emptyList())
@@ -33,10 +37,15 @@ const istudyStatus = ref(null)
 const monitoring = ref(false)
 const busyGroups = ref(new Set())
 
-const scoreDrawer = ref(false)
-const scoreGroup = ref(null)
-const scoreRows = ref([])
-const scoreLoading = ref(false)
+const detailDrawer = ref(false)
+const detailGroup = ref(null)
+const detailRows = ref([])
+const detailLoading = ref(false)
+
+const gradeDrawer = ref(false)
+const gradeGroup = ref(null)
+const gradeRows = ref([])
+const gradeLoading = ref(false)
 
 let monitorTimer = null
 let monitorTicks = 0
@@ -64,11 +73,24 @@ const summary = computed(() => {
 
 const lastSyncedAt = computed(() => activeData.value.last_synced_at)
 
-const scoreSummary = computed(() => ({
-  total: scoreRows.value.length,
-  scored: scoreRows.value.filter((item) => item.istudy_score != null).length,
-  downloaded: scoreRows.value.filter((item) => item.file_state === 'ready').length,
+const detailSummary = computed(() => ({
+  total: detailRows.value.length,
+  scored: detailRows.value.filter((item) => item.istudy_score != null).length,
+  downloaded: detailRows.value.filter((item) => item.file_state === 'ready').length,
 }))
+
+const gradeSummary = computed(() => {
+  const scored = gradeRows.value.filter((item) => item.ai_score != null)
+  return {
+    total: gradeRows.value.length,
+    scored: scored.length,
+    average: scored.length
+      ? (
+          scored.reduce((total, item) => total + Number(item.ai_score), 0) / scored.length
+        ).toFixed(1)
+      : '—',
+  }
+})
 
 const workStatusMeta = {
   not_started: { label: '未开始', type: 'info' },
@@ -86,6 +108,16 @@ const fileStateMeta = {
 function formatDateTime(value) {
   if (!value) return '尚未同步'
   return String(value).replace('T', ' ').slice(0, 16)
+}
+
+function formatScore(value) {
+  const number = Number(value)
+  return Number.isInteger(number) ? String(number) : number.toFixed(1)
+}
+
+function emptyImageText(row) {
+  if (row.state !== 'submitted') return '无图片'
+  return row.file_state === 'ready' ? '无图片' : '尚未下载'
 }
 
 function groupKey(row) {
@@ -131,8 +163,14 @@ async function loadLists({ quiet = false } = {}) {
   if (!quiet) loading.value = true
   try {
     const [workResult, labResult] = await Promise.allSettled([
-      listIstudyWorks({ course_id: courseId.value }),
-      listIstudyLabReports({ course_id: courseId.value }),
+      listIstudyWorks({
+        course_id: courseId.value,
+        class_id: classId.value === 'all' ? undefined : classId.value,
+      }),
+      listIstudyLabReports({
+        course_id: courseId.value,
+        class_id: classId.value === 'all' ? undefined : classId.value,
+      }),
     ])
     if (workResult.status === 'fulfilled') {
       workData.value = workResult.value
@@ -149,13 +187,29 @@ async function loadLists({ quiet = false } = {}) {
   }
 }
 
+async function loadCourseClasses() {
+  if (!courseId.value) {
+    courseClasses.value = []
+    return
+  }
+  try {
+    const data = await listCourseClasses(courseId.value, { page: 1, page_size: 200 })
+    courseClasses.value = data.items
+  } catch (error) {
+    courseClasses.value = []
+    throw error
+  }
+}
+
 async function loadCourses() {
   try {
     const data = await listCourses({ page: 1, page_size: 200 })
     courses.value = data.items
     if (!courses.value.some((item) => item.id === courseId.value)) {
       courseId.value = courses.value[0]?.id ?? null
+      classId.value = 'all'
     }
+    await loadCourseClasses()
     await loadLists()
   } catch (error) {
     ElMessage.error(error.message)
@@ -163,6 +217,12 @@ async function loadCourses() {
 }
 
 async function changeCourse() {
+  classId.value = 'all'
+  try {
+    await loadCourseClasses()
+  } catch (error) {
+    ElMessage.error(`班级列表加载失败：${error.message}`)
+  }
   await loadLists()
 }
 
@@ -298,33 +358,67 @@ async function downloadGroup(row) {
   }
 }
 
-async function openScores(row) {
-  scoreGroup.value = row
-  scoreRows.value = []
-  scoreDrawer.value = true
-  scoreLoading.value = true
-  try {
-    const requests = (row.classes || []).map((item) =>
-      row.source === 'lab'
-        ? listIstudyLabSubmissions(item.work_id)
-        : listIstudySubmissions(item.work_id),
-    )
-    const result = await Promise.allSettled(requests)
-    scoreRows.value = result
-      .filter((item) => item.status === 'fulfilled')
-      .flatMap((item) => item.value)
-      .sort((a, b) =>
-        `${a.class_name || ''}${a.student_no || ''}`.localeCompare(
-          `${b.class_name || ''}${b.student_no || ''}`,
-          'zh-CN',
-        ),
-      )
-    if (result.every((item) => item.status === 'rejected')) {
-      ElMessage.error('成绩明细加载失败')
-    }
-  } finally {
-    scoreLoading.value = false
+async function fetchGroupSubmissions(row) {
+  const requests = (row.classes || []).map((item) =>
+    row.source === 'lab'
+      ? listIstudyLabSubmissions(item.work_id)
+      : listIstudySubmissions(item.work_id),
+  )
+  if (!requests.length) return []
+  const result = await Promise.allSettled(requests)
+  const fulfilled = result.filter((item) => item.status === 'fulfilled')
+  if (!fulfilled.length) {
+    throw new Error(result[0]?.reason?.message || '学生数据加载失败')
   }
+  if (fulfilled.length < result.length) {
+    ElMessage.warning('部分班级的学生数据加载失败，当前展示已加载的班级')
+  }
+  return fulfilled
+    .flatMap((item) => item.value)
+    .sort((a, b) =>
+      `${a.class_name || ''}${a.student_no || ''}`.localeCompare(
+        `${b.class_name || ''}${b.student_no || ''}`,
+        'zh-CN',
+      ),
+    )
+}
+
+async function loadDetails(row) {
+  detailLoading.value = true
+  try {
+    detailRows.value = await fetchGroupSubmissions(row)
+  } catch (error) {
+    detailRows.value = []
+    ElMessage.error(`详情加载失败：${error.message}`)
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function openDetails(row) {
+  detailGroup.value = row
+  detailRows.value = []
+  detailDrawer.value = true
+  await loadDetails(row)
+}
+
+async function loadGrades(row) {
+  gradeLoading.value = true
+  try {
+    gradeRows.value = await fetchGroupSubmissions(row)
+  } catch (error) {
+    gradeRows.value = []
+    ElMessage.error(`成绩加载失败：${error.message}`)
+  } finally {
+    gradeLoading.value = false
+  }
+}
+
+async function openGrades(row) {
+  gradeGroup.value = row
+  gradeRows.value = []
+  gradeDrawer.value = true
+  await loadGrades(row)
 }
 
 onMounted(async () => {
@@ -364,6 +458,25 @@ onBeforeUnmount(stopMonitor)
           @change="changeCourse"
         >
           <el-option v-for="item in courses" :key="item.id" :label="item.name" :value="item.id" />
+        </el-select>
+      </div>
+
+      <div class="sync-course">
+        <span>班级</span>
+        <el-select
+          v-model="classId"
+          placeholder="全部班级"
+          filterable
+          style="width: 220px"
+          @change="loadLists()"
+        >
+          <el-option label="全部班级" value="all" />
+          <el-option
+            v-for="item in courseClasses"
+            :key="item.id"
+            :label="item.full_name || item.name"
+            :value="item.id"
+          />
         </el-select>
       </div>
 
@@ -467,7 +580,7 @@ onBeforeUnmount(stopMonitor)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="195" fixed="right">
+        <el-table-column label="操作" width="270" fixed="right">
           <template #default="{ row }">
             <div class="sync-actions">
               <el-button
@@ -480,20 +593,26 @@ onBeforeUnmount(stopMonitor)
               >
                 {{ pendingDownloadCount(row) ? `下载 ${pendingDownloadCount(row)} 份` : '已下载' }}
               </el-button>
-              <el-button link :icon="View" @click="openScores(row)">查看成绩</el-button>
+              <el-button link :icon="View" @click="openDetails(row)">查看详情</el-button>
+              <el-button link @click="openGrades(row)">查看成绩</el-button>
             </div>
           </template>
         </el-table-column>
       </el-table>
     </section>
 
-    <el-drawer v-model="scoreDrawer" :title="`成绩明细 · ${scoreGroup?.name || ''}`" size="880px">
+    <el-drawer v-model="detailDrawer" :title="`提交详情 · ${detailGroup?.name || ''}`" size="880px">
       <div class="score-overview">
-        <div><span>学生记录</span><strong>{{ scoreSummary.total }}</strong></div>
-        <div><span>已有成绩</span><strong>{{ scoreSummary.scored }}</strong></div>
-        <div><span>附件已入库</span><strong>{{ scoreSummary.downloaded }}</strong></div>
+        <div><span>学生记录</span><strong>{{ detailSummary.total }}</strong></div>
+        <div><span>i学习已有成绩</span><strong>{{ detailSummary.scored }}</strong></div>
+        <div><span>附件已入库</span><strong>{{ detailSummary.downloaded }}</strong></div>
       </div>
-      <el-table :data="scoreRows" v-loading="scoreLoading" max-height="650" empty-text="还没有学生成绩数据">
+      <el-table
+        :data="detailRows"
+        v-loading="detailLoading"
+        max-height="650"
+        empty-text="还没有学生提交数据"
+      >
         <el-table-column prop="class_name" label="班级" width="130" />
         <el-table-column prop="student_no" label="学号" width="135" />
         <el-table-column prop="student_name" label="姓名" width="100" />
@@ -518,6 +637,64 @@ onBeforeUnmount(stopMonitor)
         </el-table-column>
         <el-table-column label="提交时间" min-width="150">
           <template #default="{ row }">{{ formatDateTime(row.submitted_at) }}</template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+
+    <el-drawer v-model="gradeDrawer" :title="`AI 评阅成绩 · ${gradeGroup?.name || ''}`" size="980px">
+      <div class="grade-toolbar">
+        <span>成绩与“评审与成绩”页实时关联，未评阅的学生显示“无”。</span>
+        <el-button size="small" :loading="gradeLoading" @click="loadGrades(gradeGroup)">刷新</el-button>
+      </div>
+      <div class="score-overview">
+        <div><span>学生人数</span><strong>{{ gradeSummary.total }}</strong></div>
+        <div><span>已有 AI 评分</span><strong>{{ gradeSummary.scored }}</strong></div>
+        <div><span>平均分</span><strong>{{ gradeSummary.average }}</strong></div>
+      </div>
+      <el-table
+        :data="gradeRows"
+        v-loading="gradeLoading"
+        max-height="650"
+        empty-text="还没有学生提交数据"
+      >
+        <el-table-column prop="class_name" label="班级" width="130" />
+        <el-table-column label="姓名" width="120">
+          <template #default="{ row }">
+            <div class="sync-name-cell">
+              <strong>{{ row.student_name || '—' }}</strong>
+              <span>{{ row.student_no }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="作业图片" min-width="420">
+          <template #default="{ row }">
+            <div v-if="row.image_keys?.length" class="grade-image-list">
+              <el-image
+                v-for="(key, index) in row.image_keys"
+                :key="key"
+                :src="fileDownloadUrl(key)"
+                :preview-src-list="row.image_keys.map((item) => fileDownloadUrl(item))"
+                :initial-index="index"
+                fit="cover"
+                lazy
+                preview-teleported
+                class="grade-image"
+              />
+            </div>
+            <span v-else class="grade-empty">{{ emptyImageText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="AI 自动评阅成绩" width="170" align="center" header-align="center">
+          <template #default="{ row }">
+            <div class="grade-score-cell">
+              <template v-if="row.ai_score != null">
+                <strong>{{ formatScore(row.ai_score) }}</strong>
+                <span>分</span>
+                <small v-if="row.ai_is_manual">人工调整</small>
+              </template>
+              <span v-else class="grade-empty">无</span>
+            </div>
+          </template>
         </el-table-column>
       </el-table>
     </el-drawer>

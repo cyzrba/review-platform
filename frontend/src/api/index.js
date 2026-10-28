@@ -72,6 +72,10 @@ export const syncIstudyWorkScores = (courseId) =>
   http
     .post('/istudy/works/sync-scores', { course_id: courseId }, { timeout: 900000 })
     .then((r) => r.data)
+export const restoreRubricResults = (rubricId) =>
+  http.post(`/istudy/rubrics/${rubricId}/restore-results`, null, { timeout: 300000 }).then(
+    (r) => r.data,
+  )
 export const listIstudyWorks = (params = {}) =>
   http.get('/istudy/works', { params }).then((r) => r.data)
 export const exportIstudyWork = (workId, payload = {}) =>
@@ -119,6 +123,14 @@ export const getRubric = (id) => http.get(`/rubrics/${id}`).then((r) => r.data)
 export const createRubric = (payload) => http.post('/rubrics', payload).then((r) => r.data)
 export const updateRubric = (id, payload) => http.patch(`/rubrics/${id}`, payload).then((r) => r.data)
 export const deleteRubric = (id) => http.delete(`/rubrics/${id}`)
+export const uploadRubricMaterial = (id, role, file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return http.post(`/rubrics/${id}/materials/${role}`, form, { timeout: 300000 }).then((r) => r.data)
+}
+export const getRubricMaterialPreview = (id, role) =>
+  http.get(`/rubrics/${id}/materials/${role}/preview`).then((r) => r.data)
+export const deleteRubricMaterial = (id, role) => http.delete(`/rubrics/${id}/materials/${role}`)
 
 // ---------- 上传与评审 ----------
 export const uploadSubmissions = (rubricId, files, { classId = null, courseId = null } = {}) => {

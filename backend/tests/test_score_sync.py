@@ -5,7 +5,17 @@ from __future__ import annotations
 from uuid import uuid4
 
 from app.database import SessionLocal
-from app.models import Course, IstudyWork
+from sqlalchemy import select
+
+from app.models import (
+    Course,
+    GradingResult,
+    GradingKind,
+    IstudyWork,
+    ResultStatus,
+    Rubric,
+    Student,
+)
 from app.services import score_sync
 
 
@@ -100,3 +110,44 @@ def test_sync_work_scores_persists_scores_and_list_stats(client, monkeypatch):
     by_no = {item["student_no"]: item for item in submissions}
     assert by_no[no_zhang]["istudy_score"] == 88
     assert by_no[no_li]["istudy_score"] is None
+    assert by_no[no_zhang]["ai_score"] is None
+    assert by_no[no_zhang]["ai_result_status"] is None
+
+    with SessionLocal() as db:
+        student = db.execute(
+            select(Student).where(Student.student_no == no_zhang)
+        ).scalar_one()
+        rubric = Rubric(
+            name="第 1 次作业",
+            kind=GradingKind.homework,
+            source="istudy",
+        )
+        db.add(rubric)
+        db.flush()
+        rubric_id = rubric.id
+        work = db.get(IstudyWork, work_id)
+        work.rubric_id = rubric.id
+        db.add(
+            GradingResult(
+                rubric_id=rubric.id,
+                student_id=student.id,
+                class_id=class_id,
+                source_filename="张三.pdf",
+                object_key="answer.pdf",
+                status=ResultStatus.graded,
+                score=93.5,
+            )
+        )
+        db.commit()
+
+    submissions = client.get(f"/api/istudy/works/{work_id}/submissions").json()
+    by_no = {item["student_no"]: item for item in submissions}
+    assert by_no[no_zhang]["ai_result_status"] == "graded"
+    assert by_no[no_zhang]["ai_score"] == 93.5
+    assert by_no[no_li]["ai_result_status"] is None
+    assert by_no[no_li]["ai_score"] is None
+
+    result_page = client.get(f"/api/rubrics/{rubric_id}/results").json()
+    result = result_page["items"][0]
+    assert result["istudy_score"] == 88
+    assert result["score"] == 93.5

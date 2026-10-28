@@ -19,10 +19,12 @@ from .schemas import (
     CourseBrief,
     CourseOut,
     GradingResultOut,
+    RubricAttachmentOut,
     RubricOut,
     RubricStats,
     StudentOut,
 )
+from .services.rubric_materials import page_keys
 
 
 def course_briefs(links) -> list[CourseBrief]:  # noqa: ANN001
@@ -123,10 +125,23 @@ def rubric_stats(db: Session, rubric_id: int) -> RubricStats:
 
 
 def rubric_out(db: Session, rubric: Rubric) -> RubricOut:
+    attachments = [
+        RubricAttachmentOut(
+            role=item.role,
+            filename=item.filename,
+            object_key=item.object_key,
+            content_type=item.content_type,
+            size_bytes=item.size_bytes,
+            page_count=len(page_keys(item)),
+            created_at=item.created_at,
+        )
+        for item in rubric.attachments
+    ]
     return RubricOut(
         id=rubric.id,
         name=rubric.name,
         kind=rubric.kind,
+        source=rubric.source,
         description=rubric.description,
         criteria=rubric.criteria,
         total_score=rubric.total_score,
@@ -134,10 +149,11 @@ def rubric_out(db: Session, rubric: Rubric) -> RubricOut:
         created_at=rubric.created_at,
         stats=rubric_stats(db, rubric.id),
         courses=course_briefs(rubric.course_links),
+        attachments=attachments,
     )
 
 
-def result_out(obj: GradingResult) -> GradingResultOut:
+def result_out(obj: GradingResult, *, istudy_score: float | None = None) -> GradingResultOut:
     klass = obj.class_
     return GradingResultOut(
         id=obj.id,
@@ -156,6 +172,7 @@ def result_out(obj: GradingResult) -> GradingResultOut:
         match_reason=obj.match_reason,
         status=obj.status,
         score=obj.score,
+        istudy_score=istudy_score,
         comment=obj.comment,
         model=obj.model,
         graded_at=obj.graded_at,

@@ -284,10 +284,41 @@ class Rubric(Base, TimestampMixin):
     results: Mapped[list["GradingResult"]] = relationship(
         back_populates="rubric", cascade="all, delete-orphan"
     )
+    attachments: Mapped[list["RubricAttachment"]] = relationship(
+        back_populates="rubric", cascade="all, delete-orphan"
+    )
     course_links: Mapped[list["CourseRubric"]] = relationship(
         back_populates="rubric", cascade="all, delete-orphan"
     )
     works: Mapped[list["IstudyWork"]] = relationship(back_populates="rubric")
+
+
+class RubricAttachment(Base, TimestampMixin):
+    """评分细则材料：criteria=评分标准 Word，reference=原题与答案 PDF。"""
+
+    __tablename__ = "rubric_attachments"
+    __table_args__ = (
+        UniqueConstraint("rubric_id", "role", name="uq_rubric_attachments_rubric_role"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rubric_id: Mapped[int] = mapped_column(
+        ForeignKey("rubrics.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="criteria 评分标准 Word / reference 原题与答案 PDF"
+    )
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(128))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checksum: Mapped[str | None] = mapped_column(String(64))
+    extracted_text: Mapped[str | None] = mapped_column(Text)
+    page_keys_json: Mapped[str | None] = mapped_column(
+        Text, comment="PDF 每页渲染图的 object key，JSON 数组"
+    )
+
+    rubric: Mapped["Rubric"] = relationship(back_populates="attachments")
 
 
 # --------------------------------------------------------------------------- #

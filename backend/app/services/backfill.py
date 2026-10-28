@@ -346,6 +346,7 @@ async def apply_backfill(
             result.istudy_backfill_score = score
             result.istudy_backfilled_at = datetime.now()
             result.istudy_backfill_message = "已写入 i学习"
+            submission.istudy_score = score
             db.commit()
             receipts.append(
                 {

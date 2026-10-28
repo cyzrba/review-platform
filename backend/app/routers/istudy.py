@@ -15,6 +15,7 @@ from ..database import get_db
 from ..models import (
     Course,
     ExportStatus,
+    GradingKind,
     GradingResult,
     IstudyExport,
     IstudyLabReport,
@@ -42,6 +43,7 @@ from ..schemas import (
     IstudyLabExportResult,
     IstudyLabSyncRequest,
     IstudyLabSyncResult,
+    IstudyRestoreResultOut,
     IstudyRosterImportRequest,
     IstudyRosterImportResult,
     IstudyScoreSyncRequest,
@@ -61,6 +63,30 @@ from ..services.istudy import IstudyClient, IstudyError
 from ..services.roster_sync import import_rows
 
 router = APIRouter(tags=["i学习"])
+
+
+@router.post(
+    "/istudy/rubrics/{rubric_id}/restore-results",
+    response_model=IstudyRestoreResultOut,
+    summary="从已下载的学生提交恢复缺失的待评审记录",
+)
+def istudy_restore_results(
+    rubric_id: int, db: Session = Depends(get_db)
+) -> IstudyRestoreResultOut:
+    rubric = db.get(Rubric, rubric_id)
+    if rubric is None:
+        raise HTTPException(status_code=404, detail="评分细则不存在")
+    result = (
+        lab_sync.restore_grading_results(db, rubric)
+        if rubric.kind == GradingKind.lab_report
+        else homework_sync.restore_grading_results(db, rubric)
+    )
+    message = (
+        f"已恢复 {result['created']} 条待评审记录"
+        if result["created"]
+        else "没有需要恢复的已下载提交"
+    )
+    return IstudyRestoreResultOut(rubric_id=rubric.id, message=message, **result)
 
 
 @router.get("/istudy/status", response_model=IstudyStatus, summary="i学习 连接与登录状态")
@@ -368,6 +394,24 @@ def istudy_export_status(export_id: int, db: Session = Depends(get_db)) -> Istud
     return IstudyExportOut.model_validate(row)
 
 
+def _ai_results_by_student(
+    db: Session, rubric_id: int | None, student_ids: list[int]
+) -> dict[int, GradingResult]:
+    if not rubric_id or not student_ids:
+        return {}
+    rows = (
+        db.execute(
+            select(GradingResult).where(
+                GradingResult.rubric_id == rubric_id,
+                GradingResult.student_id.in_(student_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {row.student_id: row for row in rows}
+
+
 @router.get(
     "/istudy/works/{work_id}/submissions",
     response_model=list[IstudySubmissionOut],
@@ -396,9 +440,16 @@ def istudy_work_submissions(
         .scalars()
         .all()
     }
+    ai_results = _ai_results_by_student(db, work.rubric_id, student_ids)
     out: list[IstudySubmissionOut] = []
     for row in rows:
         student = students.get(row.student_id)
+        ai_result = ai_results.get(row.student_id)
+        ai_score = (
+            ai_result.score
+            if ai_result and ai_result.status == ResultStatus.graded and ai_result.score is not None
+            else None
+        )
         out.append(
             IstudySubmissionOut(
                 id=row.id,
@@ -416,6 +467,10 @@ def istudy_work_submissions(
                 istudy_score=row.istudy_score,
                 error_message=row.error_message,
                 image_keys=[item.object_key for item in row.files],
+                ai_result_status=ai_result.status if ai_result else None,
+                ai_score=ai_score,
+                ai_graded_at=ai_result.graded_at if ai_result else None,
+                ai_is_manual=ai_result.is_manual if ai_result else False,
             )
         )
     return out
@@ -725,10 +780,17 @@ def istudy_lab_report_submissions(
         .scalars()
         .all()
     }
+    ai_results = _ai_results_by_student(db, report.rubric_id, student_ids)
     class_name = report.class_.name if report.class_ else ""
     out: list[IstudySubmissionOut] = []
     for row in rows:
         student = students.get(row.student_id)
+        ai_result = ai_results.get(row.student_id)
+        ai_score = (
+            ai_result.score
+            if ai_result and ai_result.status == ResultStatus.graded and ai_result.score is not None
+            else None
+        )
         out.append(
             IstudySubmissionOut(
                 id=row.id,
@@ -746,6 +808,10 @@ def istudy_lab_report_submissions(
                 istudy_score=row.istudy_score,
                 error_message=row.error_message,
                 image_keys=[item.object_key for item in row.files],
+                ai_result_status=ai_result.status if ai_result else None,
+                ai_score=ai_score,
+                ai_graded_at=ai_result.graded_at if ai_result else None,
+                ai_is_manual=ai_result.is_manual if ai_result else False,
             )
         )
     return out

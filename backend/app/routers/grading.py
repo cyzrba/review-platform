@@ -12,7 +12,19 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Class, Course, CourseClass, GradingResult, ResultStatus, Rubric, Student
+from ..models import (
+    Class,
+    Course,
+    CourseClass,
+    GradingResult,
+    IstudyLabReport,
+    IstudyLabSubmission,
+    IstudySubmission,
+    IstudyWork,
+    ResultStatus,
+    Rubric,
+    Student,
+)
 from ..pagination import Page, PageParams, fetch_page, make_page, page_params
 from ..schemas import (
     GradeRunRequest,
@@ -47,6 +59,43 @@ def _get_rubric(db: Session, rubric_id: int) -> Rubric:
     if obj is None:
         raise HTTPException(status_code=404, detail="评分细则不存在")
     return obj
+
+
+def _istudy_scores(
+    db: Session, rubric_id: int, student_ids: list[int]
+) -> dict[int, float]:
+    if not student_ids:
+        return {}
+    scores: dict[int, float] = {}
+    work_rows = db.execute(
+        select(IstudySubmission.student_id, IstudySubmission.istudy_score)
+        .join(IstudyWork, IstudyWork.id == IstudySubmission.work_id)
+        .where(
+            IstudyWork.rubric_id == rubric_id,
+            IstudySubmission.student_id.in_(student_ids),
+            IstudySubmission.istudy_score.is_not(None),
+        )
+    ).all()
+    lab_rows = db.execute(
+        select(IstudyLabSubmission.student_id, IstudyLabSubmission.istudy_score)
+        .join(IstudyLabReport, IstudyLabReport.id == IstudyLabSubmission.report_id)
+        .where(
+            IstudyLabReport.rubric_id == rubric_id,
+            IstudyLabSubmission.student_id.in_(student_ids),
+            IstudyLabSubmission.istudy_score.is_not(None),
+        )
+    ).all()
+    for student_id, score in [*work_rows, *lab_rows]:
+        if score is not None:
+            scores[student_id] = float(score)
+    return scores
+
+
+def _result_istudy_score(
+    obj: GradingResult, scores: dict[int, float]
+) -> float | None:
+    score = scores.get(obj.student_id)
+    return score if score is not None else obj.istudy_backfill_score
 
 
 def _candidate_students(
@@ -326,7 +375,15 @@ def list_results(
         stmt = stmt.where(or_(Student.student_no.like(like), Student.name.like(like)))
     stmt = stmt.order_by(Class.name, Student.student_no)
     rows, total = fetch_page(db, stmt, params)
-    return make_page([result_out(item) for item in rows], total, params)
+    scores = _istudy_scores(db, rubric_id, [item.student_id for item in rows])
+    return make_page(
+        [
+            result_out(item, istudy_score=_result_istudy_score(item, scores))
+            for item in rows
+        ],
+        total,
+        params,
+    )
 
 
 @router.get("/grading-results/{result_id}", response_model=GradingResultOut, summary="单条评分结果")
@@ -334,7 +391,8 @@ def get_result(result_id: int, db: Session = Depends(get_db)) -> GradingResultOu
     obj = db.get(GradingResult, result_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="评分结果不存在")
-    return result_out(obj)
+    scores = _istudy_scores(db, obj.rubric_id, [obj.student_id])
+    return result_out(obj, istudy_score=_result_istudy_score(obj, scores))
 
 
 @router.get(
@@ -381,7 +439,8 @@ def update_result(
         obj.status = ResultStatus.graded
     db.commit()
     db.refresh(obj)
-    return result_out(obj)
+    scores = _istudy_scores(db, obj.rubric_id, [obj.student_id])
+    return result_out(obj, istudy_score=_result_istudy_score(obj, scores))
 
 
 @router.delete("/grading-results/{result_id}", status_code=204, summary="删除一条评分结果")

@@ -858,6 +858,70 @@ def switch_assignment_rubric(db: Session, work: IstudyWork, rubric: Rubric) -> d
     db.flush()
     return {"moved": moved, "skipped": skipped, "rubric_id": rubric.id}
 
+
+def restore_grading_results(db: Session, rubric: Rubric) -> dict[str, int]:
+    """把已经下载到本地、但缺失评分记录的学生提交重新登记为待评审。"""
+    works = (
+        db.execute(select(IstudyWork).where(IstudyWork.rubric_id == rubric.id))
+        .scalars()
+        .all()
+    )
+    if not works:
+        return {"created": 0, "existing": 0, "skipped": 0}
+
+    work_ids = [item.id for item in works]
+    submissions = (
+        db.execute(
+            select(IstudySubmission)
+            .where(
+                IstudySubmission.work_id.in_(work_ids),
+                IstudySubmission.file_state == FileState.ready,
+            )
+            .order_by(IstudySubmission.id)
+        )
+        .scalars()
+        .all()
+    )
+    existing = set(
+        db.execute(
+            select(GradingResult.student_id).where(GradingResult.rubric_id == rubric.id)
+        ).scalars()
+    )
+    created = skipped = 0
+    for submission in submissions:
+        if submission.student_id in existing:
+            continue
+        student = submission.student
+        object_key = submission.object_key or (
+            submission.files[0].object_key if submission.files else None
+        )
+        if student is None or not object_key:
+            skipped += 1
+            continue
+        db.add(
+            GradingResult(
+                rubric_id=rubric.id,
+                student_id=student.id,
+                class_id=submission.work.class_id or student.class_id,
+                source_filename=(
+                    submission.source_filename
+                    or (submission.files[0].filename if submission.files else None)
+                    or f"{student.name}.pdf"
+                ),
+                object_key=object_key,
+                content_type=submission.content_type,
+                size_bytes=submission.size_bytes,
+                checksum=submission.content_checksum or submission.checksum,
+                match_reason="从已下载提交恢复",
+                status=ResultStatus.pending,
+            )
+        )
+        existing.add(student.id)
+        created += 1
+    db.commit()
+    return {"created": created, "existing": len(existing) - created, "skipped": skipped}
+
+
 def delete_submission_files(
     db: Session,
     submission: IstudySubmission,

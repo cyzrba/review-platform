@@ -170,11 +170,32 @@ class RubricStats(BaseModel):
     min_score: float | None = None
 
 
+class RubricAttachmentOut(BaseModel):
+    role: str
+    filename: str
+    object_key: str
+    content_type: str | None = None
+    size_bytes: int = 0
+    page_count: int = 0
+    created_at: datetime
+
+
+class RubricMaterialPreviewOut(BaseModel):
+    role: str
+    filename: str
+    content_type: str | None = None
+    object_key: str
+    extracted_text: str | None = None
+    page_keys: list[str] = Field(default_factory=list)
+
+
 class RubricOut(ORMModel, RubricBase):
     id: int
+    source: str = "manual"
     created_at: datetime
     stats: RubricStats = Field(default_factory=RubricStats)
     courses: list[CourseBrief] = Field(default_factory=list, description="挂靠的课程")
+    attachments: list[RubricAttachmentOut] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +218,7 @@ class GradingResultOut(ORMModel):
     match_reason: str | None = None
     status: ResultStatus
     score: float | None = None
+    istudy_score: float | None = Field(None, description="i学习 上这次作业的真实总分")
     comment: str | None = None
     model: str | None = None
     graded_at: datetime | None = None
@@ -527,6 +549,20 @@ class IstudySubmissionOut(BaseModel):
     istudy_score: float | None = None
     error_message: str | None = None
     image_keys: list[str] = Field(default_factory=list, description="作答图片的 object key，按顺序")
+    ai_result_status: ResultStatus | None = Field(
+        None, description="本地 AI 评审状态；为 graded 且 ai_score 有值时代表已有评分"
+    )
+    ai_score: float | None = Field(None, description="与评审与成绩页同步的本地总分")
+    ai_graded_at: datetime | None = None
+    ai_is_manual: bool = Field(False, description="该分数是否经过人工复核调整")
+
+
+class IstudyRestoreResultOut(BaseModel):
+    rubric_id: int
+    created: int = 0
+    existing: int = 0
+    skipped: int = 0
+    message: str = ""
 
 
 # --------------------------------------------------------------------------- #

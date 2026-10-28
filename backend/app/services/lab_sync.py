@@ -326,6 +326,70 @@ def report_group(db: Session, report: IstudyLabReport) -> list[IstudyLabReport]:
     return list(rows) or [report]
 
 
+def restore_grading_results(db: Session, rubric: Rubric) -> dict[str, int]:
+    """把已经下载到本地、但缺失评分记录的实验报告提交重新登记为待评审。"""
+    reports = (
+        db.execute(select(IstudyLabReport).where(IstudyLabReport.rubric_id == rubric.id))
+        .scalars()
+        .all()
+    )
+    if not reports:
+        return {"created": 0, "existing": 0, "skipped": 0}
+
+    report_ids = [item.id for item in reports]
+    submissions = (
+        db.execute(
+            select(IstudyLabSubmission)
+            .where(
+                IstudyLabSubmission.report_id.in_(report_ids),
+                IstudyLabSubmission.file_state == FileState.ready,
+            )
+            .order_by(IstudyLabSubmission.id)
+        )
+        .scalars()
+        .all()
+    )
+    existing = set(
+        db.execute(
+            select(GradingResult.student_id).where(GradingResult.rubric_id == rubric.id)
+        ).scalars()
+    )
+    created = skipped = 0
+    for submission in submissions:
+        if submission.student_id in existing:
+            continue
+        student = submission.student
+        object_key = submission.object_key or (
+            submission.files[0].object_key if submission.files else None
+        )
+        if student is None or not object_key:
+            skipped += 1
+            continue
+        report = submission.report
+        db.add(
+            GradingResult(
+                rubric_id=rubric.id,
+                student_id=student.id,
+                class_id=report.class_id or student.class_id,
+                source_filename=(
+                    submission.source_filename
+                    or (submission.files[0].filename if submission.files else None)
+                    or f"{student.name}.pdf"
+                ),
+                object_key=object_key,
+                content_type=submission.content_type,
+                size_bytes=submission.size_bytes,
+                checksum=submission.content_checksum or submission.checksum,
+                match_reason="从已下载实验报告恢复",
+                status=ResultStatus.pending,
+            )
+        )
+        existing.add(student.id)
+        created += 1
+    db.commit()
+    return {"created": created, "existing": len(existing) - created, "skipped": skipped}
+
+
 # i学习 列表页在报告名旁边挂的角标就是作答状态。
 # 老师会先把报告预填好（未开始），再点发布（已开始），到期变已截止。
 LAB_STATUS_BY_TIP = {

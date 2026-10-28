@@ -7,20 +7,40 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
-from ..models import Class, Course, CourseRubric, GradingKind, GradingResult, Rubric
+from ..models import (
+    Class,
+    Course,
+    CourseRubric,
+    GradingKind,
+    GradingResult,
+    IstudyLabReport,
+    IstudyWork,
+    Rubric,
+)
 from ..pagination import Page, PageParams, fetch_page, make_page, page_params
-from ..schemas import RubricCreate, RubricOut, RubricUpdate
+from ..schemas import RubricCreate, RubricMaterialPreviewOut, RubricOut, RubricUpdate
 from ..serializers import rubric_out
+from ..services.rubric_materials import (
+    ATTACHMENT_ROLES,
+    RubricMaterialError,
+    delete_files,
+    delete_object_keys,
+    page_keys,
+    prepare_attachment,
+)
 
 router = APIRouter(tags=["评分细则"])
 
-_RUBRIC_LOAD = selectinload(Rubric.course_links).selectinload(CourseRubric.course)
+_RUBRIC_LOAD = (
+    selectinload(Rubric.course_links).selectinload(CourseRubric.course),
+    selectinload(Rubric.attachments),
+)
 
 
 def get_rubric_or_404(db: Session, rubric_id: int) -> Rubric:
@@ -51,7 +71,7 @@ def list_rubrics(
     params: PageParams = Depends(page_params),
     db: Session = Depends(get_db),
 ) -> Page[RubricOut]:
-    stmt = select(Rubric).options(_RUBRIC_LOAD)
+    stmt = select(Rubric).options(*_RUBRIC_LOAD)
     if kind is not None:
         stmt = stmt.where(Rubric.kind == kind)
     if course_id is not None:
@@ -98,13 +118,106 @@ def update_rubric(
     return rubric_out(db, obj)
 
 
+@router.post(
+    "/rubrics/{rubric_id}/materials/{role}",
+    response_model=RubricOut,
+    summary="上传或替换评分标准 Word / 原题与答案 PDF",
+)
+async def upload_rubric_material(
+    rubric_id: int,
+    role: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> RubricOut:
+    if role not in ATTACHMENT_ROLES:
+        raise HTTPException(status_code=400, detail="材料类型不正确")
+    rubric = get_rubric_or_404(db, rubric_id)
+    data = await file.read()
+    try:
+        _, old_keys = prepare_attachment(
+            db,
+            rubric,
+            role=role,
+            filename=file.filename or role,
+            data=data,
+            content_type=file.content_type,
+        )
+        db.commit()
+    except RubricMaterialError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    delete_object_keys(old_keys)
+    db.refresh(rubric)
+    return rubric_out(db, rubric)
+
+
+@router.get(
+    "/rubrics/{rubric_id}/materials/{role}/preview",
+    response_model=RubricMaterialPreviewOut,
+    summary="预览评分细则材料",
+)
+def preview_rubric_material(
+    rubric_id: int, role: str, db: Session = Depends(get_db)
+) -> RubricMaterialPreviewOut:
+    rubric = get_rubric_or_404(db, rubric_id)
+    row = next((item for item in rubric.attachments if item.role == role), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="材料不存在")
+    return RubricMaterialPreviewOut(
+        role=row.role,
+        filename=row.filename,
+        content_type=row.content_type,
+        object_key=row.object_key,
+        extracted_text=row.extracted_text,
+        page_keys=page_keys(row),
+    )
+
+
 @router.delete(
-    "/rubrics/{rubric_id}", status_code=204, summary="删除评分细则（连同其评分结果）"
+    "/rubrics/{rubric_id}/materials/{role}",
+    status_code=204,
+    summary="删除评分细则材料",
+)
+def delete_rubric_material(
+    rubric_id: int, role: str, db: Session = Depends(get_db)
+) -> Response:
+    rubric = get_rubric_or_404(db, rubric_id)
+    row = next((item for item in rubric.attachments if item.role == role), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="材料不存在")
+    db.delete(row)
+    db.commit()
+    delete_files(row)
+    return Response(status_code=204)
+
+
+@router.delete(
+    "/rubrics/{rubric_id}", status_code=204, summary="删除未被作业使用的评分细则"
 )
 def delete_rubric(rubric_id: int, db: Session = Depends(get_db)) -> Response:
     obj = get_rubric_or_404(db, rubric_id)
+    linked_work = db.execute(
+        select(IstudyWork.id).where(IstudyWork.rubric_id == rubric_id).limit(1)
+    ).first()
+    linked_lab = db.execute(
+        select(IstudyLabReport.id).where(IstudyLabReport.rubric_id == rubric_id).limit(1)
+    ).first()
+    has_results = db.execute(
+        select(GradingResult.id).where(GradingResult.rubric_id == rubric_id).limit(1)
+    ).first()
+    if linked_work or linked_lab or has_results:
+        raise HTTPException(
+            status_code=409,
+            detail="这份评分细则仍被作业使用或已有评分结果，已阻止删除以免丢失数据",
+        )
+    materials = list(obj.attachments)
     db.delete(obj)
     db.commit()
+    for material in materials:
+        delete_files(material)
     return Response(status_code=204)
 
 

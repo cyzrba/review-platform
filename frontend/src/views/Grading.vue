@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -7,34 +7,24 @@ import {
   PAGE_SIZE,
   applyIstudyBackfill,
   classSummary,
-  compareIstudyLabStudents,
-  compareIstudyStudents,
   deleteResult,
-  deleteIstudySubmissionFiles,
-  deleteIstudyWorkFiles,
   exportCsvUrl,
-  exportIstudyLabReport,
   exportXlsxUrl,
-  exportIstudyWork,
   fileDownloadUrl,
   gradeIstudyLabReport,
   gradeIstudyWork,
-  getIstudyExport,
   getResultImages,
   getRubric,
   listCourseClasses,
   listCourses,
   listIstudyLabReports,
-  listIstudyLabSubmissions,
-  listIstudySubmissions,
   listIstudyWorks,
   listResults,
   listRubrics,
   previewIstudyBackfill,
+  restoreRubricResults,
   runGrading,
   runSingleGrading,
-  syncIstudyLabReports,
-  syncIstudyWorks,
   updateResult,
 } from '@/api'
 
@@ -59,6 +49,7 @@ const courseClasses = ref([])
 // 成绩表的班级筛选（'all' = 全部班级）
 const resultsClassId = ref('all')
 const polling = ref(false)
+const restoringResults = ref(false)
 
 const drawerVisible = ref(false)
 const current = ref(null)
@@ -73,53 +64,6 @@ const statusMeta = {
   graded: { label: '已评审', type: 'success' },
   failed: { label: '评审失败', type: 'danger' },
 }
-
-// ---------- i学习 作业 ----------
-const works = ref({ items: [], total: 0, last_synced_at: null })
-const worksLoading = ref(false)
-const syncingWorks = ref(false)
-const workStatusFilter = ref('all')
-// i学习 作业卡片自己的班级筛选，跟下面的成绩表互不影响
-const worksClassId = ref('all')
-
-const workDialog = ref(false)
-const workContext = ref(null)
-// 这个弹窗既服务「作业」也服务「实验报告」：work 走 i学习 打包，lab 是直接下载
-const workSource = ref('work')
-const selectedWorkIds = ref([])
-const exportContent = ref(0)
-const exportFmt = ref(1)
-const exportForce = ref(false)
-const exportJobs = ref([])
-const exporting = ref(false)
-const exportStartedAt = ref(0)
-
-// ---------- i学习 实验报告 ----------
-const labReports = ref({ items: [], total: 0, last_synced_at: null })
-const labLoading = ref(false)
-const syncingLab = ref(false)
-const labStatusFilter = ref('all')
-const labClassId = ref('all')
-
-// 按人抓取：work_id -> 选中的学生（i学习 user id）。空 / 不存在 = 整班抓
-const pickMap = ref({})
-const studentDialog = ref(false)
-const studentLoading = ref(false)
-const studentContext = ref(null)
-const studentRows = ref([])
-const studentChecked = ref([])
-
-const studentStateMeta = {
-  new: { label: '还没抓', type: 'warning' },
-  fetched: { label: '已抓过', type: 'success' },
-  not_submitted: { label: '未交', type: 'info' },
-  not_in_roster: { label: '名单里没有', type: 'danger' },
-}
-
-const submissionsDialog = ref(false)
-const submissionsTitle = ref('')
-const submissions = ref([])
-const submissionsLoading = ref(false)
 
 // 「一键 AI 评审」弹窗：评分细则在这里选，评分细则只是丢给 AI 看的一份标准
 const reviewDialog = ref(false)
@@ -137,6 +81,14 @@ const reviewGroup = computed(
 const reviewRubric = computed(
   () => rubrics.value.find((item) => item.id === reviewRubricId.value) || null,
 )
+const reviewMissingMaterials = computed(() => {
+  if (!reviewRubric.value || reviewRubric.value.kind !== 'homework') return []
+  const roles = new Set((reviewRubric.value.attachments || []).map((item) => item.role))
+  return [
+    roles.has('criteria') ? null : '评分标准 Word',
+    roles.has('reference') ? null : '原题与答案 PDF',
+  ].filter(Boolean)
+})
 
 const reviewPendingCount = computed(() => {
   const group = reviewGroup.value
@@ -147,31 +99,16 @@ const reviewPendingCount = computed(() => {
   return Math.max(0, (row.result_count || 0) - (row.graded_count || 0))
 })
 
-const workStatusMeta = {
-  not_started: { label: '未开始', type: 'info' },
-  ongoing: { label: '进行中', type: 'warning' },
-  ended: { label: '已结束', type: 'success' },
-}
-
 /** 'all' 表示不传这个筛选条件。 */
 function classParam(value) {
   return value === 'all' || value === null || value === undefined ? undefined : value
-}
-
-const exportStatusMeta = {
-  queued: { label: '排队中', type: 'info' },
-  running: { label: '正在下载', type: 'warning' },
-  exporting: { label: 'i学习打包中', type: 'warning' },
-  downloading: { label: '下载中', type: 'warning' },
-  parsing: { label: '解包匹配中', type: 'warning' },
-  done: { label: '已完成', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
 }
 
 const kindRubrics = computed(() => rubrics.value.filter((item) => item.kind === kind.value))
 // 「评分结果」和「一键 AI 评审」里能挑的细则，只跟当前「类型」同一种，
 // 免得把作业的细则套到实验报告上
 const resultRubricOptions = computed(() => kindRubrics.value)
+const isLab = computed(() => kind.value === 'lab_report')
 const pendingCount = computed(
   () => results.value.items.filter((item) => item.status === 'pending' || item.status === 'failed').length,
 )
@@ -181,10 +118,6 @@ function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-function formatDateTime(value) {
-  return value ? String(value).replace('T', ' ').slice(5, 16) : '—'
 }
 
 async function loadCourses() {
@@ -287,6 +220,20 @@ async function refreshResults() {
   }
 }
 
+async function restoreDownloadedResults() {
+  if (!resultsRubricId.value) return
+  restoringResults.value = true
+  try {
+    const result = await restoreRubricResults(resultsRubricId.value)
+    ElMessage.success(result.message)
+    await refreshResults()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    restoringResults.value = false
+  }
+}
+
 /** 只在进页面 / 换课程时给下面的成绩卡挑一个默认作业，之后两边各管各的。 */
 async function seedResultsRubric(reset = false) {
   if (reset || !rubrics.value.some((item) => item.id === resultsRubricId.value)) {
@@ -299,11 +246,7 @@ async function onCourseChange() {
   rubricId.value = null
   resultsRubricId.value = null
   resultsClassId.value = 'all'
-  workStatusFilter.value = 'all'
-  worksClassId.value = 'all'
-  labStatusFilter.value = 'all'
-  labClassId.value = 'all'
-  await Promise.all([loadCourseClasses(), loadRubricOptions(), loadScrapeList()])
+  await Promise.all([loadCourseClasses(), loadRubricOptions()])
   await loadRubric()
   await seedResultsRubric(true)
   if (rubricId.value) router.replace(`/grading/${rubricId.value}`)
@@ -311,7 +254,6 @@ async function onCourseChange() {
 
 async function onKindChange() {
   rubricId.value = kindRubrics.value[0]?.id ?? null
-  await loadScrapeList()
   await loadRubric()
   await seedResultsRubric(true)
 }
@@ -355,6 +297,7 @@ async function openReviewDialog() {
       ? await listIstudyLabReports({ course_id: courseId.value })
       : await listIstudyWorks({ course_id: courseId.value })
     reviewWorks.value = page.items
+    if (!reviewPendingCount.value) reviewForce.value = true
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -398,7 +341,7 @@ async function submitReview() {
     } else {
       ElMessage.success(run.message)
     }
-    await Promise.all([loadWorks(), loadRubric(), loadResultsRubric()])
+    await Promise.all([loadRubric(), loadResultsRubric()])
     if (run.queued) pollUntilDone()
   } catch (error) {
     ElMessage.error(error.message)
@@ -473,416 +416,20 @@ function download(key) {
   window.open(fileDownloadUrl(key), '_blank')
 }
 
-// ---------- i学习 作业 ----------
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-async function loadWorks() {
-  if (!courseId.value || kind.value !== 'homework') {
-    works.value = { items: [], total: 0, last_synced_at: null }
-    return
-  }
-  worksLoading.value = true
-  try {
-    works.value = await listIstudyWorks({
-      course_id: courseId.value,
-      class_id: classParam(worksClassId.value),
-      status: workStatusFilter.value === 'all' ? undefined : workStatusFilter.value,
-    })
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    worksLoading.value = false
-  }
-}
-
-async function loadLabReports() {
-  if (!courseId.value || kind.value !== 'lab_report') {
-    labReports.value = { items: [], total: 0, last_synced_at: null }
-    return
-  }
-  labLoading.value = true
-  try {
-    labReports.value = await listIstudyLabReports({
-      course_id: courseId.value,
-      class_id: classParam(labClassId.value),
-      status: labStatusFilter.value === 'all' ? undefined : labStatusFilter.value,
-    })
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    labLoading.value = false
-  }
-}
-
-/** 「i学习」那张卡片：作业和实验报告共用一套筛选和表格，只是取数接口不同。 */
-const isLab = computed(() => kind.value === 'lab_report')
-const scrapeList = computed(() => (isLab.value ? labReports.value : works.value))
-const scrapeLoading = computed(() => (isLab.value ? labLoading.value : worksLoading.value))
-const scrapeTitle = computed(() => (isLab.value ? 'i学习 实验报告' : 'i学习 作业'))
-const scrapeClassId = computed({
-  get: () => (isLab.value ? labClassId.value : worksClassId.value),
-  set: (value) => {
-    if (isLab.value) labClassId.value = value
-    else worksClassId.value = value
-  },
-})
-const scrapeStatus = computed({
-  get: () => (isLab.value ? labStatusFilter.value : workStatusFilter.value),
-  set: (value) => {
-    if (isLab.value) labStatusFilter.value = value
-    else workStatusFilter.value = value
-  },
-})
-
-function loadScrapeList() {
-  return isLab.value ? loadLabReports() : loadWorks()
-}
-
-async function syncScrapeList() {
-  if (!courseId.value) return
-  if (isLab.value) {
-    syncingLab.value = true
-    try {
-      const result = await syncIstudyLabReports({ course_id: courseId.value })
-      ElMessage.success(result.message)
-      await loadLabReports()
-    } catch (error) {
-      ElMessage.error(error.message)
-    } finally {
-      syncingLab.value = false
-    }
-    return
-  }
-  await syncWorks()
-}
-
-const syncingScrape = computed(() => (isLab.value ? syncingLab.value : syncingWorks.value))
-
-async function syncWorks() {
-  if (!courseId.value) return
-  syncingWorks.value = true
-  try {
-    const result = await syncIstudyWorks({ course_id: courseId.value })
-    ElMessage.success(result.message)
-    if (result.notes?.length) ElMessage.warning(result.notes.join('；'))
-    await loadWorks()
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    syncingWorks.value = false
-  }
-}
-
-function workGroupStatus(row) {
-  if (row.status) return workStatusMeta[row.status]
-  const parts = Object.entries(row.status_breakdown || {}).map(
-    ([key, count]) => `${workStatusMeta[key]?.label || key} ${count}`,
+function isScoreMismatch(row) {
+  return (
+    row.istudy_score != null &&
+    row.score != null &&
+    Number(row.istudy_score) !== Number(row.score)
   )
-  return { label: parts.join(' / ') || '—', type: 'info' }
-}
-
-function openWorkDialog(row) {
-  workSource.value = row.source || 'work'
-  workContext.value = row
-  // 已经抓过的班级默认不勾，避免重复抓浪费时间；想重抓手动勾上就行。
-  // 实验报告的「表单型」报告本来就没有附件，也默认不勾。
-  selectedWorkIds.value = (row.classes || [])
-    .filter(
-      (item) => !item.captured_count && (workSource.value !== 'lab' || item.submitted_count > 0),
-    )
-    .map((item) => item.work_id)
-  exportContent.value = 0
-  exportFmt.value = 1
-  exportForce.value = false
-  exportJobs.value = []
-  exportStartedAt.value = 0
-  pickMap.value = {}
-  workDialog.value = true
-}
-
-/** 打开某个班的「按人抓取」明细：对比 i学习 已交名单和本地已抓。 */
-async function openStudents(row) {
-  const source = row.source || workSource.value
-  studentContext.value = { work_id: row.work_id, class_name: row.class_name, source }
-  studentDialog.value = true
-  studentLoading.value = true
-  studentRows.value = []
-  studentChecked.value = []
-  try {
-    const data =
-      source === 'lab'
-        ? await compareIstudyLabStudents(row.work_id)
-        : await compareIstudyStudents(row.work_id)
-    studentRows.value = data.students
-    const saved = pickMap.value[row.work_id]
-    studentChecked.value = saved?.length
-      ? [...saved]
-      : data.students
-          .filter((item) => item.state === 'new' && item.istudy_user_id)
-          .map((item) => item.istudy_user_id)
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    studentLoading.value = false
-  }
-}
-
-function pickableStudents() {
-  // 只有 i学习 那边确实交了作业的人才能按人导出
-  return studentRows.value.filter((item) => item.istudy_user_id)
-}
-
-function selectNewStudents() {
-  studentChecked.value = studentRows.value
-    .filter((item) => item.state === 'new' && item.istudy_user_id)
-    .map((item) => item.istudy_user_id)
-}
-
-function confirmStudents() {
-  const workId = studentContext.value?.work_id
-  if (!workId) return
-  const next = { ...pickMap.value }
-  if (studentChecked.value.length) {
-    next[workId] = [...studentChecked.value]
-  } else {
-    delete next[workId] // 没选人就当整班抓
-  }
-  pickMap.value = next
-  studentDialog.value = false
-}
-
-function pickedCount(workId) {
-  return pickMap.value[workId]?.length || 0
-}
-
-const pendingClassCount = computed(
-  () => (workContext.value?.classes || []).filter((item) => !item.captured_count).length,
-)
-
-const fetchedClassCount = computed(
-  () => (workContext.value?.classes || []).filter((item) => item.captured_count).length,
-)
-
-const skipHint = computed(() => {
-  if (!fetchedClassCount.value) return ''
-  if (!pendingClassCount.value) {
-    return `${workContext.value?.classes?.length || 0} 个班都已抓过，要重抓请勾选`
-  }
-  return `${fetchedClassCount.value} 个班已抓过，本次跳过；要重抓请勾选`
-})
-
-function selectAllClasses() {
-  selectedWorkIds.value = (workContext.value?.classes || []).map((item) => item.work_id)
-}
-
-function selectOnlyPending() {
-  selectedWorkIds.value = (workContext.value?.classes || [])
-    .filter((item) => !item.captured_count)
-    .map((item) => item.work_id)
-}
-
-function jobOf(workId) {
-  return exportJobs.value.find((item) => item.work_id === workId)
-}
-
-async function waitForExport(job) {
-  // 实验报告是同步下载（不用去 i学习 的下载中心排队），所以直接看这条报告的进度
-  if (job.source === 'lab') {
-    for (let i = 0; i < 200; i += 1) {
-      await sleep(2000)
-      try {
-        const page = await listIstudyLabReports({ course_id: courseId.value })
-        const row = (page.items || [])
-          .flatMap((group) => group.classes || [])
-          .find((item) => item.work_id === job.work_id)
-        if (!row) continue
-        // 这次没提交任何抓取任务（都抓过了 / 没人交），i学习 那边什么也不会发生
-        if (row.sync_state === 'idle') {
-          job.status = 'done'
-          return
-        }
-        job.status = row.sync_state
-        job.message = row.sync_message
-        if (row.sync_state === 'done' || row.sync_state === 'failed') return
-      } catch (error) {
-        job.status = 'failed'
-        job.message = error.message
-        return
-      }
-    }
-    job.status = 'failed'
-    job.message = '等待超时'
-    return
-  }
-  // i学习 打包是异步的，一个班实测要三分钟左右
-  for (let i = 0; i < 300; i += 1) {
-    await sleep(4000)
-    let row
-    try {
-      row = await getIstudyExport(job.export_id)
-    } catch (error) {
-      job.status = 'failed'
-      job.message = error.message
-      return
-    }
-    job.status = row.status
-    job.message = row.message
-    if (row.status === 'done' || row.status === 'failed') return
-  }
-  job.status = 'failed'
-  job.message = '等待超时'
-}
-
-async function runExport() {
-  if (!selectedWorkIds.value.length) {
-    ElMessage.warning('请至少选择一个班级')
-    return
-  }
-  exporting.value = true
-  exportStartedAt.value = Date.now()
-  const picked = workContext.value.classes.filter((item) =>
-    selectedWorkIds.value.includes(item.work_id),
-  )
-  exportJobs.value = picked.map((item) => ({
-    work_id: item.work_id,
-    class_name: item.class_name,
-    source: workSource.value,
-    export_id: null,
-    status: 'queued',
-    message: '准备提交',
-  }))
-
-  // 1) 先把所有班的导出都提交上去，i学习 那边会并行打包
-  await Promise.all(
-    exportJobs.value.map(async (job) => {
-      try {
-        const picked = pickMap.value[job.work_id] || []
-        if (job.source === 'lab') {
-          const created = await exportIstudyLabReport(job.work_id, {
-            student_ids: picked.length ? picked : null,
-            force: picked.length ? false : exportForce.value,
-          })
-          job.status = created.queued ? 'running' : 'done'
-          job.message = created.queued
-            ? picked.length
-              ? `正在从 i学习 下载（只抓选中的 ${picked.length} 人）`
-              : `正在从 i学习 下载（${created.queued} 人）`
-            : created.message
-          return
-        }
-        const created = await exportIstudyWork(job.work_id, {
-          // 按人抓取时后端会强制用「仅提交附件」：i学习 的按人导出配 PDF 会卡住
-          content: picked.length ? 1 : exportContent.value,
-          fmt: exportFmt.value,
-          person_ids: picked.length ? picked : null,
-        })
-        job.export_id = created.id
-        job.status = created.status
-        job.message = picked.length
-          ? `已提交给 i学习（只抓选中的 ${picked.length} 人）`
-          : created.message || '已提交给 i学习'
-      } catch (error) {
-        job.status = 'failed'
-        job.message = error.message
-      }
-    }),
-  )
-
-  // 2) 再一起轮询进度
-  await Promise.all(
-    // 作业是异步打包，要拿 export_id 去轮询；实验报告是同步下载，直接看这条报告的进度
-    exportJobs.value
-      .filter((job) => job.export_id || job.source === 'lab')
-      .map((job) => waitForExport(job)),
-  )
-
-  exporting.value = false
-  const done = exportJobs.value.filter((job) => job.status === 'done').length
-  if (done === exportJobs.value.length) {
-    ElMessage.success(`已完成 ${done} 个班的附件抓取`)
-  } else {
-    ElMessage.warning(`完成 ${done} / ${exportJobs.value.length} 个班，失败的可以重试`)
-  }
-  await loadScrapeList()
-}
-
-const submissionsWorkId = ref(null)
-const submissionsClassName = ref('')
-const submissionsSource = ref('work')
-
-async function loadSubmissions() {
-  if (!submissionsWorkId.value) return
-  submissionsLoading.value = true
-  try {
-    submissions.value =
-      submissionsSource.value === 'lab'
-        ? await listIstudyLabSubmissions(submissionsWorkId.value)
-        : await listIstudySubmissions(submissionsWorkId.value)
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    submissionsLoading.value = false
-  }
-}
-
-async function openSubmissions(workId, className, source = 'work') {
-  submissionsWorkId.value = workId
-  submissionsClassName.value = className
-  submissionsSource.value = source
-  submissionsDialog.value = true
-  submissions.value = []
-  submissionsTitle.value = `${workContext.value?.name || ''} · ${className}`
-  await loadSubmissions()
-}
-
-// ---------- 删除本地附件（不影响 i学习 上的提交） ----------
-const deleteDialog = ref(false)
-const deleteTarget = ref(null)
-const deleteWholeWork = ref(false)
-const deleteAlsoResult = ref(false)
-const deletingFiles = ref(false)
-
-function askDeleteSubmission(row) {
-  deleteTarget.value = row
-  deleteWholeWork.value = false
-  deleteAlsoResult.value = false
-  deleteDialog.value = true
-}
-
-function askDeleteAll() {
-  deleteTarget.value = null
-  deleteWholeWork.value = true
-  deleteAlsoResult.value = false
-  deleteDialog.value = true
-}
-
-async function confirmDeleteFiles() {
-  if (!submissionsWorkId.value) return
-  deletingFiles.value = true
-  try {
-    const result = deleteWholeWork.value
-      ? await deleteIstudyWorkFiles(submissionsWorkId.value, deleteAlsoResult.value)
-      : await deleteIstudySubmissionFiles(deleteTarget.value.id, deleteAlsoResult.value)
-    const mb = (Number(result.freed_bytes || 0) / 1024 / 1024).toFixed(1)
-    ElMessage.success(`已删除 ${result.files} 个文件，释放 ${mb} MB 磁盘空间`)
-    deleteDialog.value = false
-    await loadSubmissions()
-    await loadScrapeList()
-    if (result.results_deleted) await refreshResults()
-  } catch (error) {
-    ElMessage.error(error.message)
-  } finally {
-    deletingFiles.value = false
-  }
-}
-
-function imagePreviewList(row) {
-  return (row.image_keys || []).map((key) => fileDownloadUrl(key))
 }
 
 // ---------- 把本地分数 / 评语回填到 i学习 ----------
 const backfillDialog = ref(false)
+const backfillGateDialog = ref(false)
+const backfillGateSeconds = ref(3)
 const backfillWork = ref(null)
+const backfillFinding = ref(false)
 const backfillLoading = ref(false)
 const backfillApplying = ref(false)
 const backfillRows = ref([])
@@ -891,6 +438,7 @@ const backfillOverwrite = ref(false)
 const backfillWriteComment = ref(true)
 const backfillProgress = ref({ done: 0, total: 0 })
 const backfillReceipts = ref([])
+let backfillGateTimer = null
 
 const backfillWorkId = computed(
   () => backfillWork.value?.classes?.[0]?.work_id || null,
@@ -910,6 +458,42 @@ function backfillActionMeta(action) {
   return { label: '跳过', type: 'info' }
 }
 
+function stopBackfillGateTimer() {
+  if (backfillGateTimer) {
+    clearInterval(backfillGateTimer)
+    backfillGateTimer = null
+  }
+  backfillGateSeconds.value = 3
+}
+
+function openBackfillGate() {
+  if (!resultsRubricId.value || !courseId.value) return
+  if (!resultsRubric.value?.stats?.graded_count) {
+    ElMessage.warning('当前作业还没有可回填的评审成绩')
+    return
+  }
+  stopBackfillGateTimer()
+  backfillGateDialog.value = true
+  backfillGateTimer = setInterval(() => {
+    if (backfillGateSeconds.value <= 1) {
+      backfillGateSeconds.value = 0
+      if (backfillGateTimer) {
+        clearInterval(backfillGateTimer)
+        backfillGateTimer = null
+      }
+      return
+    }
+    backfillGateSeconds.value -= 1
+  }, 1000)
+}
+
+async function confirmBackfillGate() {
+  if (backfillGateSeconds.value > 0) return
+  stopBackfillGateTimer()
+  backfillGateDialog.value = false
+  await openBackfillForRubric()
+}
+
 async function openBackfill(row) {
   backfillWork.value = row
   backfillDialog.value = true
@@ -918,6 +502,26 @@ async function openBackfill(row) {
   backfillReceipts.value = []
   backfillProgress.value = { done: 0, total: 0 }
   await loadBackfillPreview()
+}
+
+async function openBackfillForRubric() {
+  if (!resultsRubricId.value || !courseId.value) return
+  backfillFinding.value = true
+  try {
+    const page = await listIstudyWorks({ course_id: courseId.value })
+    const row = (page.items || []).find((item) =>
+      (item.rubric_ids || []).includes(resultsRubricId.value),
+    )
+    if (!row) {
+      ElMessage.warning('没有找到这份评分细则对应的 i学习 作业')
+      return
+    }
+    await openBackfill(row)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    backfillFinding.value = false
+  }
 }
 
 async function loadBackfillPreview() {
@@ -989,7 +593,6 @@ async function runBackfill() {
     } else {
       ElMessage.success(`回填完成：成功写入 ${okCount} 人`)
     }
-    await loadScrapeList()
     await refreshResults()
   } catch (error) {
     ElMessage.error(error.message)
@@ -1009,23 +612,20 @@ function exportFile(format) {
 watch(resultsClassId, () => {
   loadResults(1)
 })
-watch(workStatusFilter, () => loadWorks())
-watch(worksClassId, () => loadWorks())
-watch(labStatusFilter, () => loadLabReports())
-watch(labClassId, () => loadLabReports())
 
 onMounted(async () => {
   try {
     await loadCourses()
     await loadRubricOptions()
     await loadCourseClasses()
-    await loadScrapeList()
     await loadRubric()
     await seedResultsRubric(true)
   } catch (error) {
     ElMessage.error(error.message)
   }
 })
+
+onBeforeUnmount(stopBackfillGateTimer)
 </script>
 
 <template>
@@ -1098,133 +698,6 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div class="table-card" style="margin-bottom: 16px" v-if="courseId">
-      <div class="toolbar">
-        <span style="font-weight: 600">{{ scrapeTitle }}</span>
-        <el-select v-model="scrapeClassId" style="width: 170px">
-          <el-option label="全部班级" value="all" />
-          <el-option
-            v-for="item in courseClasses"
-            :key="item.id"
-            :label="item.full_name"
-            :value="item.id"
-          />
-        </el-select>
-        <el-select v-model="scrapeStatus" style="width: 150px">
-          <el-option label="全部状态" value="all" />
-          <el-option label="未开始" value="not_started" />
-          <el-option label="进行中" value="ongoing" />
-          <el-option label="已结束" value="ended" />
-        </el-select>
-        <el-button @click="loadScrapeList">刷新</el-button>
-        <el-button type="primary" :loading="syncingScrape" @click="syncScrapeList">
-          从 i学习 同步{{ isLab ? '实验报告' : '作业' }}
-        </el-button>
-        <span class="muted" v-if="scrapeList.last_synced_at">
-          上次同步 {{ formatDateTime(scrapeList.last_synced_at) }}
-        </span>
-      </div>
-
-      <el-table
-        :data="scrapeList.items"
-        v-loading="scrapeLoading"
-        :empty-text="`还没有${isLab ? '实验报告' : '作业'}`"
-      >
-        <el-table-column :label="isLab ? '实验报告' : '作业'" min-width="130">
-          <template #default="{ row }">
-            <el-tooltip
-              :content="`作答时间：${formatDateTime(row.start_at)} ~ ${formatDateTime(row.end_at)}`"
-              placement="top"
-            >
-              <span>{{ row.name }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column label="班级" width="120">
-          <template #default="{ row }">
-            <el-popover v-if="row.class_count > 1" placement="right" trigger="hover" width="240">
-              <template #reference>
-                <span style="cursor: pointer">{{ row.class_count }} 个班</span>
-              </template>
-              <div v-for="item in row.classes" :key="item.work_id" style="line-height: 24px">
-                {{ item.class_name }}
-                <el-tag
-                  v-if="row.source === 'lab' && item.report_type !== 2"
-                  size="small"
-                  type="info"
-                  style="margin-left: 4px"
-                >
-                  表单型
-                </el-tag>
-                <span class="muted">
-                  （{{ workStatusMeta[item.status]?.label || item.status }} · 已交
-                  {{ item.submitted_count }}）
-                </span>
-              </div>
-            </el-popover>
-            <span v-else>
-              {{ row.classes[0]?.class_name || '—' }}
-              <el-tag
-                v-if="row.source === 'lab' && row.classes[0]?.report_type !== 2"
-                size="small"
-                type="info"
-              >
-                表单型
-              </el-tag>
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="130">
-          <template #default="{ row }">
-            <el-tag size="small" :type="workGroupStatus(row).type">
-              {{ workGroupStatus(row).label }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="i学习 已交/未交" width="140">
-          <template #default="{ row }">
-            {{ row.submitted_count }} / {{ row.unsubmitted_count }}
-          </template>
-        </el-table-column>
-        <el-table-column label="抓取进度" min-width="185">
-          <template #default="{ row }">
-            <span
-              :class="{ muted: !row.captured_count }"
-              style="white-space: nowrap"
-            >已抓 {{ row.captured_count }} 人 / 待抓 {{ Math.max(0, row.submitted_count - row.captured_count) }} 人</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="待评审" width="85">
-          <template #default="{ row }">
-            {{ Math.max(0, (row.result_count || 0) - (row.graded_count || 0)) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openWorkDialog(row)">抓取附件</el-button>
-            <el-button
-              link
-              :disabled="!row.captured_count"
-              @click="
-                openSubmissions(row.classes[0].work_id, row.classes[0].class_name, row.source)
-              "
-            >
-              明细
-            </el-button>
-            <el-button
-              link
-              type="primary"
-              :disabled="isLab || !row.graded_count"
-              :title="isLab ? '实验报告回填还没接' : '把本地分数和评语写回 i学习'"
-              @click="openBackfill(row)"
-            >
-              回填分数
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
-
     <template v-if="rubric">
       <div class="table-card">
         <div class="toolbar">
@@ -1256,9 +729,28 @@ onMounted(async () => {
             />
           </el-select>
           <el-button @click="refreshResults">刷新</el-button>
+          <el-button
+            v-if="resultsRubric?.source?.startsWith('istudy') && !resultsRubric?.stats?.result_count"
+            :loading="restoringResults"
+            @click="restoreDownloadedResults"
+          >
+            恢复已下载提交
+          </el-button>
           <el-tag v-if="polling" type="warning">评审中…</el-tag>
-          <el-button type="primary" :disabled="!pendingCount" @click="openReviewDialog">
-            一键 AI 评审（本页 {{ pendingCount }} 条待评）
+          <el-button type="primary" :disabled="!resultsRubricId" @click="openReviewDialog">
+            {{
+              pendingCount
+                ? `一键 AI 评审（本页 ${pendingCount} 条待评）`
+                : '一键 AI 评审 / 重新评审'
+            }}
+          </el-button>
+          <el-button
+            v-if="resultsRubric?.kind === 'homework'"
+            :loading="backfillFinding"
+            :disabled="!resultsRubric?.stats?.graded_count"
+            @click="openBackfillGate"
+          >
+            回填到 i学习
           </el-button>
         </div>
 
@@ -1279,8 +771,17 @@ onMounted(async () => {
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="总分" width="70">
-            <template #default="{ row }">{{ row.score ?? '—' }}</template>
+          <el-table-column label="总分" width="80" align="center" header-align="center">
+            <template #default="{ row }">{{ row.istudy_score ?? '-' }}</template>
+          </el-table-column>
+          <el-table-column label="AI评审" width="90" align="center" header-align="center">
+            <template #default="{ row }">
+              <span
+                :style="isScoreMismatch(row) ? 'color: #e8590c; font-weight: 600' : ''"
+              >
+                {{ row.score ?? '-' }}
+              </span>
+            </template>
           </el-table-column>
           <el-table-column prop="comment" label="评语" min-width="180" show-overflow-tooltip />
           <el-table-column label="操作" width="210" fixed="right">
@@ -1335,8 +836,8 @@ onMounted(async () => {
       description="请先选择课程"
     />
     <el-empty
-      v-else-if="!scrapeList.items.length && !scrapeLoading"
-      :description="`还没有${isLab ? '实验报告' : '作业'}`"
+      v-else-if="!kindRubrics.length"
+      :description="`这门课下还没有可评阅的${isLab ? '实验报告' : '作业'}细则`"
     />
     <el-empty
       v-else-if="!rubric"
@@ -1458,6 +959,13 @@ onMounted(async () => {
               : `本次将评审 ${reviewPendingCount} 条记录（满分 ${reviewRubric?.total_score ?? 100}）`
           "
         />
+        <el-alert
+          v-if="reviewMissingMaterials.length"
+          type="warning"
+          :closable="false"
+          style="margin-top: 12px"
+          :title="`评分细则缺少：${reviewMissingMaterials.join('、')}。请先到评分细则页补齐材料。`"
+        />
       </div>
 
       <template #footer>
@@ -1465,10 +973,64 @@ onMounted(async () => {
         <el-button
           type="primary"
           :loading="reviewing"
-          :disabled="!reviewRubricId || (!reviewForce && !reviewPendingCount)"
+          :disabled="
+            !reviewRubricId ||
+            reviewMissingMaterials.length ||
+            (!reviewForce && !reviewPendingCount)
+          "
           @click="submitReview"
         >
           开始评审
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="backfillGateDialog"
+      title="确认回填到 i学习"
+      width="560px"
+      :close-on-click-modal="false"
+      @closed="stopBackfillGateTimer"
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        title="这是写操作，确认后会把这次作业的成绩和评语回传到 i学习。"
+      />
+      <div style="margin-top: 18px; line-height: 1.8">
+        <div>
+          即将回填的作业：<strong>{{ resultsRubric?.name || '当前作业' }}</strong>
+        </div>
+        <div class="muted">
+          确认后将先进入这次作业的回填预览。请核对学生、本地分数和 i学习
+          上这次作业的现有分数，再执行最终写入。
+        </div>
+      </div>
+      <div
+        style="
+          margin-top: 16px;
+          padding: 12px 14px;
+          color: #985f0d;
+          background: #fff8e8;
+          border: 1px solid #f5dfb1;
+          border-radius: 10px;
+          font-size: 12px;
+        "
+      >
+        {{
+          backfillGateSeconds > 0
+            ? `请仔细阅读以上说明，${backfillGateSeconds} 秒后才能继续。`
+            : '倒计时已结束，现在可以确认并进入回填预览。'
+        }}
+      </div>
+      <template #footer>
+        <el-button @click="backfillGateDialog = false">取消</el-button>
+        <el-button
+          type="danger"
+          :disabled="backfillGateSeconds > 0"
+          @click="confirmBackfillGate"
+        >
+          {{ backfillGateSeconds > 0 ? `请等待 ${backfillGateSeconds} 秒` : '确认并继续' }}
         </el-button>
       </template>
     </el-dialog>
@@ -1551,333 +1113,5 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog
-      v-model="studentDialog"
-      :title="`按人抓取 · ${studentContext?.class_name || ''}`"
-      width="720px"
-    >
-      <div v-loading="studentLoading">
-        <el-alert
-          type="info"
-          :closable="false"
-          style="margin-bottom: 12px"
-          title="对比 i学习 已交名单与本地已抓，勾选后只导出这些人"
-        />
-        <div style="margin-bottom: 8px">
-          <el-button link type="primary" @click="selectNewStudents">只勾还没抓的</el-button>
-          <el-button link @click="studentChecked = []">全不选</el-button>
-          <el-button link @click="studentChecked = pickableStudents().map((s) => s.istudy_user_id)">
-            全选可导出的
-          </el-button>
-          <span class="muted" style="margin-left: 8px">
-            已选 {{ studentChecked.length }} 人
-          </span>
-        </div>
-        <el-table :data="studentRows" size="small" max-height="420">
-          <el-table-column width="46">
-            <template #default="{ row }">
-              <el-checkbox
-                :model-value="studentChecked.includes(row.istudy_user_id)"
-                :disabled="!row.istudy_user_id"
-                @change="(checked) => {
-                  const next = new Set(studentChecked)
-                  if (checked) next.add(row.istudy_user_id)
-                  else next.delete(row.istudy_user_id)
-                  studentChecked = [...next]
-                }"
-              />
-            </template>
-          </el-table-column>
-          <el-table-column prop="student_no" label="学号" width="120" />
-          <el-table-column prop="name" label="姓名" width="100" />
-          <el-table-column label="状态" width="120">
-            <template #default="{ row }">
-              <el-tag size="small" :type="studentStateMeta[row.state]?.type">
-                {{ studentStateMeta[row.state]?.label || row.state }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="submitted_at" label="提交时间" width="130" />
-        </el-table>
-        <div class="muted" style="margin-top: 10px">
-          「未交」和「名单里没有」的无法导出
-        </div>
-      </div>
-
-      <template #footer>
-        <el-button @click="studentDialog = false">取消</el-button>
-        <el-button type="primary" @click="confirmStudents">
-          确定（{{ studentChecked.length ? `只抓 ${studentChecked.length} 人` : '改回整班抓' }}）
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="workDialog"
-      :title="`抓取${workSource === 'lab' ? '实验报告' : '作业附件'} · ${workContext?.name || ''}`"
-      width="840px"
-    >
-      <el-steps
-        :active="exportJobs.length ? (exporting ? 1 : 2) : 0"
-        simple
-        style="margin-bottom: 18px"
-      >
-        <el-step title="选择范围" />
-        <el-step title="抓取附件" />
-      </el-steps>
-
-      <template v-if="workContext">
-        <template v-if="!exportJobs.length">
-          <div
-            style="
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              margin-bottom: 10px;
-            "
-          >
-            <span style="font-weight: 600">班级</span>
-            <span>
-              <el-button link type="primary" @click="selectOnlyPending">只选没抓过的</el-button>
-              <el-button link @click="selectAllClasses">全选（含重抓）</el-button>
-            </span>
-          </div>
-          <el-checkbox-group v-model="selectedWorkIds">
-            <el-checkbox
-              v-for="item in workContext.classes"
-              :key="item.work_id"
-              :value="item.work_id"
-              style="display: block; margin-bottom: 6px"
-            >
-              {{ item.class_name }}
-              <el-tag
-                v-if="workSource === 'lab' && item.report_type !== 2"
-                size="small"
-                type="info"
-                style="margin-left: 4px"
-              >
-                表单型（没有附件）
-              </el-tag>
-              <el-tag
-                v-if="workSource === 'lab'"
-                size="small"
-                :type="workStatusMeta[item.status]?.type"
-                style="margin-left: 4px"
-              >
-                {{ workStatusMeta[item.status]?.label || item.status }}
-              </el-tag>
-              <span v-if="item.captured_count" class="muted">
-                （已抓 {{ item.captured_count }} 人 / 待抓
-                {{ Math.max(0, item.submitted_count - item.captured_count) }} 人）
-              </span>
-              <span v-else class="muted">
-                （已抓 0 人 / 待抓 {{ item.submitted_count }} 人）
-              </span>
-              <el-button link type="primary" style="margin-left: 8px" @click.stop="openStudents(item)">
-                详情
-              </el-button>
-              <el-tag v-if="pickedCount(item.work_id)" size="small" type="warning">
-                只抓 {{ pickedCount(item.work_id) }} 人
-              </el-tag>
-            </el-checkbox>
-          </el-checkbox-group>
-
-          <el-alert
-            v-if="skipHint"
-            type="success"
-            :closable="false"
-            style="margin-top: 12px"
-            :title="skipHint"
-          />
-          <el-alert
-            v-if="Object.keys(pickMap).length && workSource !== 'lab'"
-            type="warning"
-            :closable="false"
-            style="margin-top: 10px"
-            title="按人抓取的班级用「仅提交附件」格式"
-          />
-
-          <template v-if="workSource === 'lab'">
-            <div style="font-weight: 600; margin: 18px 0 10px">抓取方式</div>
-            <el-checkbox v-model="exportForce">已经抓过的学生也重新抓一遍</el-checkbox>
-            <div class="muted" style="margin-top: 6px; font-size: 13px">
-              默认只抓还没抓过的人，新交的那几个补一下就行。
-            </div>
-          </template>
-          <template v-else>
-            <div style="font-weight: 600; margin: 18px 0 10px">导出内容</div>
-            <el-radio-group v-model="exportContent">
-              <el-radio :value="0" style="display: block; margin-bottom: 6px">
-                完整答题记录（PDF）
-              </el-radio>
-              <el-radio :value="1" style="display: block">
-                仅学生提交的原始附件
-              </el-radio>
-            </el-radio-group>
-          </template>
-
-          <el-alert
-            type="info"
-            :closable="false"
-            style="margin-top: 16px"
-            :title="
-              workSource === 'lab'
-                ? '直接从 i学习 下载作答，约十几秒到一分钟，可关闭窗口，后台继续'
-                : 'i学习 打包约 3 分钟，可关闭窗口，后台继续'
-            "
-          />
-        </template>
-
-        <template v-else>
-          <el-alert
-            :type="exporting ? 'warning' : 'success'"
-            :closable="false"
-            :title="
-              exporting
-                ? workSource === 'lab'
-                  ? '正在从 i学习 下载作答…'
-                  : '正在抓取，i学习 打包通常要几分钟…'
-                : '抓取结束'
-            "
-            style="margin-bottom: 12px"
-          />
-          <el-table :data="exportJobs" size="small">
-            <el-table-column prop="class_name" label="班级" width="150" />
-            <el-table-column label="状态" width="140">
-              <template #default="{ row }">
-                <el-tag size="small" :type="exportStatusMeta[row.status]?.type">
-                  {{ exportStatusMeta[row.status]?.label || row.status }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="message" label="说明" min-width="300" show-overflow-tooltip />
-            <el-table-column label="明细" width="90">
-              <template #default="{ row }">
-                <el-button
-                  link
-                  type="primary"
-                  :disabled="row.status !== 'done'"
-                  @click="openSubmissions(row.work_id, row.class_name, row.source)"
-                >
-                  查看
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </template>
-      </template>
-
-      <template #footer>
-        <el-button v-if="exportJobs.length && !exporting" @click="exportJobs = []">重新选择</el-button>
-        <el-button @click="workDialog = false">关闭</el-button>
-        <el-button
-          v-if="!exportJobs.length"
-          type="primary"
-          :loading="exporting"
-          :disabled="!selectedWorkIds.length"
-          @click="runExport"
-        >
-          开始抓取（{{ selectedWorkIds.length }} 个班）
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-drawer
-      v-model="submissionsDialog"
-      :title="`提交明细 · ${submissionsTitle}`"
-      size="820px"
-    >
-      <div v-loading="submissionsLoading">
-        <el-empty
-          v-if="!submissionsLoading && !submissions.length"
-          description="还没有抓过这次作业的附件"
-        />
-        <div
-          v-if="submissions.length"
-          style="display: flex; justify-content: flex-end; margin-bottom: 8px"
-        >
-          <el-button
-            v-if="submissionsSource !== 'lab'"
-            link
-            type="danger"
-            @click="askDeleteAll"
-          >
-            清空本班附件
-          </el-button>
-        </div>
-        <el-table v-if="submissions.length" :data="submissions" size="small" max-height="660">
-          <el-table-column prop="student_name" label="姓名" width="90" />
-          <el-table-column prop="student_no" label="学号" width="120" />
-          <el-table-column label="状态" width="80">
-            <template #default="{ row }">
-              <el-tag size="small" :type="row.state === 'missing' ? 'info' : 'success'">
-                {{ row.state === 'missing' ? '未交' : '已交' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="作答图片" width="150">
-            <template #default="{ row }">
-              <template v-if="row.image_keys?.length">
-                <el-image
-                  v-for="(url, index) in imagePreviewList(row)"
-                  :key="url"
-                  :src="url"
-                  :preview-src-list="imagePreviewList(row)"
-                  :initial-index="index"
-                  fit="cover"
-                  preview-teleported
-                  style="width: 34px; height: 34px; margin-right: 4px; border-radius: 4px"
-                />
-              </template>
-              <span v-else class="muted">—</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="source_filename" label="文件" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="error_message" label="备注" min-width="150" show-overflow-tooltip />
-          <el-table-column label="操作" width="96" fixed="right">
-            <template #default="{ row }">
-              <el-button
-                link
-                type="danger"
-                :disabled="
-                  submissionsSource === 'lab' || (!row.size_bytes && !row.image_count)
-                "
-                @click="askDeleteSubmission(row)"
-              >
-                删除附件
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </el-drawer>
-
-    <el-dialog v-model="deleteDialog" title="删除本地附件" width="540px">
-      <el-alert
-        type="warning"
-        :closable="false"
-        title="只删除本机磁盘上的文件，i学习 上学生的提交不会受影响。"
-      />
-      <div style="margin-top: 14px; font-weight: 600">
-        {{
-          deleteWholeWork
-            ? '将清空本班这次作业的全部本地附件'
-            : `学生：${deleteTarget?.student_name || ''}（${deleteTarget?.student_no || ''}）`
-        }}
-      </div>
-      <el-checkbox v-model="deleteAlsoResult" style="margin-top: 14px">
-        同时删除对应的评分结果（分数和评语会一起删除）
-      </el-checkbox>
-      <div class="muted" style="margin-top: 8px; line-height: 1.6">
-        不勾选时评分结果会保留；但复核图片、重新评审需要重新下载附件。
-        重新下载后分数不会自动恢复，需要重新评审或手工调整。
-      </div>
-      <template #footer>
-        <el-button @click="deleteDialog = false">取消</el-button>
-        <el-button type="danger" :loading="deletingFiles" @click="confirmDeleteFiles">
-          确认删除
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>

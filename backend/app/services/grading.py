@@ -18,6 +18,7 @@ from .answer_files import prepare_for_llm
 from .document import DocumentParseError, extract_text
 from .llm_client import ImagePart
 from .reviewer import ReviewContext, get_reviewer
+from .rubric_materials import ROLE_CRITERIA, ROLE_REFERENCE, page_keys
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,21 @@ def _get_executor() -> ThreadPoolExecutor:
 def _build_context(db: Session, result: GradingResult) -> ReviewContext:
     rubric = result.rubric
     student = result.student
-    images = _collect_answer_images(db, result)
+    materials = {item.role: item for item in rubric.attachments}
+    reference_limit = max(1, settings.llm_max_images - 6)
+    reference_images = _collect_reference_images(
+        materials.get(ROLE_REFERENCE), limit=reference_limit
+    )
+    answer_images = _collect_answer_images(
+        db, result, limit=max(0, settings.llm_max_images - len(reference_images))
+    )
+    images = [*reference_images, *answer_images]
 
-    if images:
+    submission = _find_istudy_submission(db, result) or _find_lab_submission(db, result)
+    if submission is not None:
         # 从 i学习 抓下来的提交：已经把题面和作答抽成图片了，正文直接用当时抽好的，
         # 不用再去读原始 .doc（读了也解析不了，只会刷一堆 INFO 日志）
-        submission = _find_istudy_submission(db, result) or _find_lab_submission(db, result)
-        text = submission.extracted_text if submission is not None else None
+        text = submission.extracted_text
         payload = b""
     else:
         # 手工上传的提交：还是走「读文件 + 抽文本」的老路
@@ -65,6 +74,16 @@ def _build_context(db: Session, result: GradingResult) -> ReviewContext:
         filename=result.source_filename,
         content_type=result.content_type,
         file_bytes=payload,
+        criteria_document_text=(
+            materials[ROLE_CRITERIA].extracted_text
+            if ROLE_CRITERIA in materials
+            else None
+        ),
+        reference_text=(
+            materials[ROLE_REFERENCE].extracted_text
+            if ROLE_REFERENCE in materials
+            else None
+        ),
         text=text,
         images=images,
         images_sent=len(images),
@@ -148,12 +167,39 @@ def collect_answer_image_rows(db: Session, result: GradingResult) -> list[tuple[
     return rows
 
 
-def _collect_answer_images(db: Session, result: GradingResult) -> list[ImagePart]:
+def _collect_reference_images(attachment, *, limit: int) -> list[ImagePart]:  # noqa: ANN001
+    if attachment is None or limit <= 0:
+        return []
+    storage = get_storage()
+    images: list[ImagePart] = []
+    for index, key in enumerate(page_keys(attachment)[:limit], start=1):
+        try:
+            raw = storage.get_bytes(key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读不到评分参考页 %s：%s", key, exc)
+            continue
+        prepared, content_type = prepare_for_llm(
+            raw,
+            max_edge=settings.llm_image_max_edge,
+            quality=settings.llm_image_quality,
+        )
+        images.append(
+            ImagePart(
+                filename=f"{attachment.filename}-p{index}.png",
+                content_type=content_type,
+                data=prepared,
+                role="reference",
+            )
+        )
+    return images
+
+
+def _collect_answer_images(db: Session, result: GradingResult, *, limit: int) -> list[ImagePart]:
     """把图片取出来、压好，准备发给模型。"""
     storage = get_storage()
     images: list[ImagePart] = []
     for row, role in collect_answer_image_rows(db, result):
-        if len(images) >= settings.llm_max_images:
+        if len(images) >= limit:
             break
         try:
             raw = storage.get_bytes(row.object_key)

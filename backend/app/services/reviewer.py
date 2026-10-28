@@ -16,7 +16,7 @@ from typing import Any
 from ..config import settings
 from .llm_client import LLMError, ImagePart, build_messages, chat, parse_json_object
 
-PROMPT_VERSION = "v3-vision-rubric"
+PROMPT_VERSION = "v4-rubric-documents"
 
 
 @dataclass(slots=True)
@@ -34,6 +34,8 @@ class ReviewContext:
     filename: str
     content_type: str | None
     file_bytes: bytes
+    criteria_document_text: str | None = None  # 上传 Word 中提取的评分标准
+    reference_text: str | None = None  # 上传 PDF 中提取的原题与标准答案文字
     text: str | None = None  # 由评审器按需填充的文档正文
     images: list[ImagePart] = field(default_factory=list)  # 题面 + 作答，按顺序
     images_sent: int = 0
@@ -169,8 +171,9 @@ def register_reviewer(name: str, reviewer_cls: type[BaseReviewer]) -> None:
 def build_review_prompt(context: ReviewContext) -> str:
     """多模态评审用的 prompt：题面在图片里，这里给文字部分。"""
     kind_label = "实验报告" if context.kind == "lab_report" else "作业"
+    references = [img for img in context.images if img.role == "reference"]
     questions = [img for img in context.images if img.role == "question"]
-    answers = [img for img in context.images if img.role != "question"]
+    answers = [img for img in context.images if img.role not in {"question", "reference"}]
 
     lines: list[str] = [
         f"请批改《{context.rubric_name}》这份{kind_label}。",
@@ -180,16 +183,22 @@ def build_review_prompt(context: ReviewContext) -> str:
         "",
         f"满分：{context.total_score:g} 分。",
     ]
+    if context.criteria_document_text:
+        lines += ["", "【Word 评分标准】", context.criteria_document_text]
+    if context.reference_text:
+        lines += ["", "【PDF 原题与标准答案文字】", context.reference_text]
     if context.rubric_description:
         lines += ["", "【任务说明】", context.rubric_description]
     if context.extra_prompt:
         lines += ["", "【额外要求】", context.extra_prompt]
 
     lines += ["", "【图片说明】"]
+    if references:
+        lines.append(f"最前面 {len(references)} 张是老师上传的 PDF 原题与标准答案页面。")
     if questions:
-        lines.append(f"前 {len(questions)} 张是题目图片（题面）。")
+        lines.append(f"其中 {len(questions)} 张是题目图片（题面）。")
     if answers:
-        lines.append(f"后面 {len(answers)} 张是这位学生的手写作答。")
+        lines.append(f"最后 {len(answers)} 张是这位学生的手写作答。")
     if not context.images:
         lines.append("这次没有可用的图片。")
 
@@ -197,7 +206,9 @@ def build_review_prompt(context: ReviewContext) -> str:
         "",
         f"学生：{context.student_name}（{context.student_no}）",
         "",
-        "请对照题面逐题检查学生的解答，按上面的评分细则打分，然后严格按下面的 JSON 返回，不要输出别的内容：",
+        "请以 Word 评分标准为主要评分依据，同时对照 PDF 中的原题与标准答案逐题检查学生解答。"
+        "不能因为学生答案的文字表达与标准答案不同就直接扣分，应先判断物理意义、公式和计算结果是否等价。"
+        "然后严格按下面的 JSON 返回，不要输出别的内容：",
         '{"score": 分数, "breakdown": [{"item": "细则条目名", "score": 该项得分}], "comment": "评语"}',
         "",
         "要求：",
